@@ -9,21 +9,20 @@ function m3ut_update_info() {
         if ($c !== false) return $c;
     }
     $info = [];
-    $r = wp_remote_get('https://api.github.com/repos/' . M3UT_GH_REPO . '/releases/latest', [
-        'timeout' => 10,
-        'headers' => ['Accept' => 'application/vnd.github+json', 'User-Agent' => 'm3u-tracker-updater'],
+    // api.github.com bad diye shorashori releases/latest redirect theke tag ber kora (rate limit nei)
+    $r = wp_remote_head('https://github.com/' . M3UT_GH_REPO . '/releases/latest', [
+        'timeout'     => 10,
+        'redirection' => 0,
+        'user-agent'  => 'm3u-tracker-updater',
     ]);
-    if (!is_wp_error($r) && wp_remote_retrieve_response_code($r) === 200) {
-        $j = json_decode(wp_remote_retrieve_body($r), true);
-        if (!empty($j['tag_name'])) {
-            $pkg = '';
-            if (!empty($j['assets'])) {
-                foreach ($j['assets'] as $a) {
-                    if (substr($a['name'], -4) === '.zip') { $pkg = $a['browser_download_url']; break; }
-                }
-            }
-            if (!$pkg && !empty($j['zipball_url'])) $pkg = $j['zipball_url'];
-            if ($pkg) $info = ['version' => ltrim($j['tag_name'], 'vV'), 'package' => $pkg];
+    if (!is_wp_error($r)) {
+        $loc = (string) wp_remote_retrieve_header($r, 'location');
+        if (preg_match('#/releases/tag/([^/?\s]+)#', $loc, $m)) {
+            $tag  = rawurldecode($m[1]);
+            $info = [
+                'version' => ltrim($tag, 'vV'),
+                'package' => 'https://github.com/' . M3UT_GH_REPO . '/archive/refs/tags/' . rawurlencode($tag) . '.zip',
+            ];
         }
     }
     set_site_transient('m3ut_gh_info', $info, $info ? 6 * HOUR_IN_SECONDS : 30 * MINUTE_IN_SECONDS);
