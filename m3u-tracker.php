@@ -2,14 +2,14 @@
 /**
  * Plugin Name: M3U Tracker
  * Description: tv.php playlist tracker: reseller manager, customer keys, kill switch, live counter, channel stats, dead link checker, Telegram/email alerts, channels.txt editor.
- * Version: 3.3.0
+ * Version: 3.4.0
  * Author: Goodly.com.bd
  */
 
 if (!defined('ABSPATH')) exit;
 if (defined('M3UT_VERSION')) return;
 
-define('M3UT_VERSION', '3.3.0');
+define('M3UT_VERSION', '3.4.0');
 define('M3UT_DIR', plugin_dir_path(__FILE__));
 define('M3UT_LIVE_MINUTES', 6); // shesh koto minute-er hit "live" dhora hobe
 
