@@ -1,7 +1,7 @@
 <?php
 if (!defined('ABSPATH')) exit;
 
-define('M3UT_GH_REPO', 'YOUR-USERNAME/m3u-tracker');   // <-- ekhane nijer GitHub username din
+define('M3UT_GH_REPO', 'aridhipu/m3u-tracker');
 
 function m3ut_update_info() {
     if (!isset($_GET['force-check'])) {
