@@ -2,10 +2,10 @@
 /**
  * Plugin Name: M3U Tracker
   * Plugin URI: https://goodly.com.bd
- * Description: m3u/iptv playlist tracker: reseller manager, customer keys, kill switch, live counter, channel stats, dead link checker, Telegram/email alerts, channels.txt editor.
- * Version: 3.5.0
+ * Description: m3u/iptv tracker: channel stats, dead link checker, Telegram/email alerts, channel editor.
+ * Version: 3.5.1
   * Update URI: https://goodly.com.bd
- * Author: Goodly BD
+ * Author: GoodlyDev
  * Author URI: https://goodly.com.bd
  * Requires PHP:      7.4
  */
@@ -13,7 +13,7 @@
 if (!defined('ABSPATH')) exit;
 if (defined('M3UT_VERSION')) return;
 
-define('M3UT_VERSION', '3.5.0');
+define('M3UT_VERSION', '3.5.1');
 define('M3UT_DIR', plugin_dir_path(__FILE__));
 define('M3UT_LIVE_MINUTES', 6); // shesh koto minute-er hit "live" dhora hobe
 
