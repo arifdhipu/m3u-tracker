@@ -23,10 +23,10 @@ add_action('admin_head', function () {
     .m3ut-big{font-size:28px;font-weight:700;margin:6px 0 0}
     .m3ut-scroll{overflow-x:auto}
     .m3ut-form label{display:block;margin:8px 0 2px;font-weight:600}
-    .m3ut-link{width:100%;max-width:340px;font-size:12px}
-        .m3ut-c-url code,.m3ut-dchk-url code,.m3ut-dup-url code{white-space:nowrap;word-break:normal;display:inline-block}
+        .m3ut-link{width:100%;max-width:340px;min-width:200px;box-sizing:border-box;font-size:12px}
+    @media (max-width:782px){.m3ut-link{display:block;max-width:100%;min-width:220px;margin-bottom:6px}}
     .m3ut-c-url,.m3ut-dchk-url,.m3ut-dup-url{min-width:200px}
-        .m3ut-c-url code,.m3ut-dchk-url code,.m3ut-dup-url code{font-size:14px;background:#fff;border:1px solid #2271b1;padding:4px 8px;border-radius:4px;color:#1d2327}
+    .m3ut-c-url code,.m3ut-dchk-url code,.m3ut-dup-url code{white-space:nowrap;word-break:normal;display:inline-block;font-size:14px;background:#fff;border:1px solid #2271b1;padding:4px 8px;border-radius:4px;color:#1d2327}
     @keyframes m3utPulse{0%{opacity:1}50%{opacity:.25}100%{opacity:1}}
     </style>';
 });

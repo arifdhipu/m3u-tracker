@@ -4,7 +4,7 @@ if (!defined('ABSPATH')) exit;
 define('M3UT_GH_REPO', 'arifdhipu/m3u-tracker');
 
 function m3ut_update_info() {
-    if (!isset($_GET['force-check'])) {
+    if (!isset($_GET['force-check']) && !isset($_GET['m3ut_debug2'])) {
         $c = get_site_transient('m3ut_gh_info');
         if ($c !== false) return $c;
     }
@@ -47,6 +47,26 @@ add_filter('pre_set_site_transient_update_plugins', function ($t) {
     } else {
         $t->no_update[$file] = $item;
     }
+    return $t;
+});
+
+/* Page kholar shomoy-i update info jure deya (check-timing-er upor nirbhor korte hobe na) */
+add_filter('site_transient_update_plugins', function ($t) {
+    if (!is_object($t)) return $t;
+    $info = m3ut_update_info();
+    if (empty($info['version']) || empty($info['package'])) return $t;
+    if (!version_compare($info['version'], M3UT_VERSION, '>')) return $t;
+    $file = plugin_basename(M3UT_DIR . 'm3u-tracker.php');
+    if (!isset($t->response) || !is_array($t->response)) $t->response = [];
+    $t->response[$file] = (object) [
+        'id'          => $file,
+        'slug'        => 'm3u-tracker',
+        'plugin'      => $file,
+        'new_version' => $info['version'],
+        'url'         => 'https://github.com/' . M3UT_GH_REPO,
+        'package'     => $info['package'],
+    ];
+    if (isset($t->no_update) && is_array($t->no_update)) unset($t->no_update[$file]);
     return $t;
 });
 

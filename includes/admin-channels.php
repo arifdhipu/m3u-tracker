@@ -26,13 +26,121 @@ function m3ut_backup_channels($content) {
     array_unshift($b, ['t' => m3ut_now(), 'c' => $content]);
     update_option('m3ut_backups', array_slice($b, 0, 8), false);
 }
-function m3ut_write_channels($content) {
+function m3ut_write_channels($content, $track = true) {
     $file = m3ut_channels_file();
     if (m3ut_is_remote_path($file)) return false; // remote source — WP theke shorashori likha jay na
-    if (file_exists($file)) m3ut_backup_channels((string) file_get_contents($file));
+    $exists = file_exists($file);
+    $old = $exists ? (string) file_get_contents($file) : '';
+    if ($exists) m3ut_backup_channels($old);
     $content = str_replace("\r\n", "\n", $content);
-    return @file_put_contents($file, $content, LOCK_EX) !== false;
+    $ok = @file_put_contents($file, $content, LOCK_EX) !== false;
+    // Undo/Redo: kono change hole age-er obostha history-te rakhi ($track=false hole undo/redo nijei likhche, tai rakhi na)
+    if ($ok && $track && $exists && str_replace("\r\n", "\n", $old) !== $content) m3ut_hist_push($old, $content);
+    return $ok;
 }
+
+/* ---------- Undo / Redo (edit, delete, move, add, bulk — shob-i) ---------- */
+function m3ut_hist_get() {
+    $h = get_option('m3ut_history', []);
+    if (!is_array($h)) $h = [];
+    foreach (['undo', 'redo'] as $k) if (empty($h[$k]) || !is_array($h[$k])) $h[$k] = [];
+    return $h;
+}
+function m3ut_hist_pack($c) {
+    return function_exists('gzcompress') ? 'z:' . base64_encode(gzcompress((string) $c, 6)) : 'p:' . base64_encode((string) $c);
+}
+function m3ut_hist_unpack($s) {
+    $s = (string) $s;
+    if (strncmp($s, 'z:', 2) === 0) { $r = @gzuncompress((string) base64_decode(substr($s, 2))); return $r === false ? '' : $r; }
+    if (strncmp($s, 'p:', 2) === 0) return (string) base64_decode(substr($s, 2));
+    return '';
+}
+function m3ut_hist_label($old, $new) {
+    $o = m3ut_parse((string) $old); $n = m3ut_parse((string) $new);
+    $co = count($o); $cn = count($n);
+    if ($cn < $co) return 'Delete ' . ($co - $cn) . ' ta';
+    if ($cn > $co) return 'Add ' . ($cn - $co) . ' ta';
+    $ou = array_column($o, 'uh'); $nu = array_column($n, 'uh');
+    if ($ou !== $nu) { $x = $ou; $y = $nu; sort($x); sort($y); if ($x === $y) return 'Move'; }
+    return 'Edit';
+}
+function m3ut_hist_push($old, $new) {
+    $h = m3ut_hist_get();
+    $h['undo'][] = ['t' => m3ut_now(), 'l' => m3ut_hist_label($old, $new), 'c' => m3ut_hist_pack($old)];
+    $h['undo'] = array_slice($h['undo'], -20); // shesh 20 ta step
+    $h['redo'] = [];                            // notun change hole redo muche jay
+    update_option('m3ut_history', $h, false);
+}
+
+add_action('wp_ajax_m3ut_chan_history', function () {
+    if (!current_user_can('manage_options')) wp_send_json_error('Permission nei');
+    check_ajax_referer('m3ut_chan_nonce', 'nonce');
+    if (m3ut_is_remote_path(m3ut_channels_file())) wp_send_json_error(m3ut_remote_block_msg());
+    $op = isset($_POST['op']) ? sanitize_key(wp_unslash($_POST['op'])) : '';
+    if (!in_array($op, ['undo', 'redo'], true)) wp_send_json_error('Invalid action');
+    $from = $op; $to = ($op === 'undo') ? 'redo' : 'undo';
+    $h = m3ut_hist_get();
+    if (empty($h[$from])) wp_send_json_error($op === 'undo' ? 'Undo korar moto kichu nei' : 'Redo korar moto kichu nei');
+    $entry = array_pop($h[$from]);
+    $content = m3ut_hist_unpack(isset($entry['c']) ? $entry['c'] : '');
+    if (trim($content) === '') wp_send_json_error('History data pawa jayni');
+    $file = m3ut_channels_file();
+    $cur = file_exists($file) ? (string) file_get_contents($file) : '';
+    if (!m3ut_write_channels($content, false)) wp_send_json_error('File likha jayni. channels.txt file/folder writable kina check korun.');
+    $label = isset($entry['l']) ? (string) $entry['l'] : 'Edit';
+    $h[$to][] = ['t' => m3ut_now(), 'l' => $label, 'c' => m3ut_hist_pack($cur)];
+    $h[$to] = array_slice($h[$to], -20);
+    update_option('m3ut_history', $h, false);
+    wp_send_json_success(['msg' => ($op === 'undo' ? 'Undo hoyeche: ' : 'Redo hoyeche: ') . $label]);
+});
+
+function m3ut_history_ui() {
+    if (m3ut_is_remote_path(m3ut_channels_file())) return; // remote source-e edit hoy na, tai undo-o nei
+    $h = m3ut_hist_get();
+    $nu = count($h['undo']); $nr = count($h['redo']);
+    $lu = $nu ? end($h['undo']) : null;
+    $lr = $nr ? end($h['redo']) : null;
+    ?>
+    <div id="m3ut-hist-bar" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:14px 0 0;padding:8px 12px;background:#fff;border:1px solid #dcdcde;border-radius:6px">
+        <strong>Undo / Redo:</strong>
+        <button type="button" class="button" id="m3ut-hist-undo" data-on="<?php echo $nu ? 1 : 0; ?>" <?php echo $nu ? '' : 'disabled'; ?> title="<?php echo $lu ? esc_attr($lu['t']) : ''; ?>">↶ Undo<?php echo $lu ? ' — ' . esc_html($lu['l']) : ''; ?></button>
+        <button type="button" class="button" id="m3ut-hist-redo" data-on="<?php echo $nr ? 1 : 0; ?>" <?php echo $nr ? '' : 'disabled'; ?> title="<?php echo $lr ? esc_attr($lr['t']) : ''; ?>">↷ Redo<?php echo $lr ? ' — ' . esc_html($lr['l']) : ''; ?></button>
+        <span class="description"><?php echo (int) $nu; ?> step undo-te · <?php echo (int) $nr; ?> step redo-te (edit / delete / move / add shob-i dhora hoy)</span>
+        <span id="m3ut-hist-msg" style="font-weight:600"></span>
+    </div>
+    <script>
+    (function () {
+        var AJAX = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+        var NONCE = <?php echo wp_json_encode(wp_create_nonce('m3ut_chan_nonce')); ?>;
+        var bu = document.getElementById('m3ut-hist-undo'), br = document.getElementById('m3ut-hist-redo'), msg = document.getElementById('m3ut-hist-msg');
+        function run(op) {
+            var body = new URLSearchParams();
+            body.append('action', 'm3ut_chan_history'); body.append('nonce', NONCE); body.append('op', op);
+            bu.disabled = true; br.disabled = true;
+            msg.style.color = '#2271b1'; msg.textContent = 'Kaj cholche…';
+            fetch(AJAX, { method: 'POST', credentials: 'same-origin', body: body })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (!res || !res.success) {
+                        bu.disabled = bu.getAttribute('data-on') !== '1'; br.disabled = br.getAttribute('data-on') !== '1';
+                        msg.style.color = '#d63638'; msg.textContent = (res && res.data) ? res.data : 'Fail hoyeche';
+                        return;
+                    }
+                    msg.style.color = '#00a32a'; msg.textContent = res.data.msg;
+                    setTimeout(function () { location.reload(); }, 600);
+                })
+                .catch(function () {
+                    bu.disabled = bu.getAttribute('data-on') !== '1'; br.disabled = br.getAttribute('data-on') !== '1';
+                    msg.style.color = '#d63638'; msg.textContent = 'Network error, abar try korun';
+                });
+        }
+        bu.addEventListener('click', function () { run('undo'); });
+        br.addEventListener('click', function () { run('redo'); });
+    })();
+    </script>
+    <?php
+}
+
 function m3ut_remote_block_msg() {
     return 'Ei channels source ekta remote URL (.m3u/.m3u8/.php link) — WordPress theke shorashori add/edit/delete kora jay na. Remote file-e giye change korun.';
 }
@@ -93,6 +201,22 @@ add_action('wp_ajax_m3ut_chan_edit', function () {
     unset($c);
     if (!$found) wp_send_json_error('Channel ta ekhon file-e nei (kew age-i change kore fele thakte pare) — page reload korun');
     if (!m3ut_write_channels(m3ut_channels_to_raw($chs))) wp_send_json_error('File likha jayni. channels.txt file/folder writable kina check korun.');
+        // Dead link checker-er list (links table) o update rakhi, na hole reload-er por purono naam fire ashe
+    global $wpdb;
+    $lt = m3ut_t('links');
+    if ($nc['uh'] === $uh) {
+        // URL ager-i ache: shudhu naam/group update
+        $wpdb->update($lt, ['cname' => substr($nc['name'], 0, 190), 'cgroup' => substr($nc['group'], 0, 100)], ['url_hash' => $uh]);
+    } else {
+        // URL bodleche (notun hash): purono row muche notun row ("Check hoyni") jog kori, position (seq) ager moto
+        $oldseq = (int) $wpdb->get_var($wpdb->prepare("SELECT seq FROM $lt WHERE url_hash=%s", $uh));
+        $wpdb->delete($lt, ['url_hash' => $uh]);
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO $lt (url_hash, chash, cname, cgroup, url, seq, status) VALUES (%s, %s, %s, %s, %s, %d, 'unknown')
+             ON DUPLICATE KEY UPDATE chash=VALUES(chash), cname=VALUES(cname), cgroup=VALUES(cgroup), seq=VALUES(seq)",
+            $nc['uh'], $nc['hash'], substr($nc['name'], 0, 190), substr($nc['group'], 0, 100), $nc['url'], $oldseq
+        ));
+    }
     wp_send_json_success(['uh' => $nc['uh'], 'no' => $nc['no'] ?? 0, 'name' => $nc['name'], 'group' => $nc['group'], 'logo' => $nc['logo'], 'url' => $nc['url']]);
 });
 
@@ -108,7 +232,9 @@ add_action('wp_ajax_m3ut_chan_delete', function () {
     $chs = array_values(array_filter($chs, function ($c) use ($uh) { return $c['uh'] !== $uh; }));
     if (count($chs) === $before) wp_send_json_error('Channel ta age theke-i nei — page reload korun');
     if (!m3ut_write_channels(m3ut_channels_to_raw($chs))) wp_send_json_error('File likha jayni. channels.txt file/folder writable kina check korun.');
-    wp_send_json_success(['uh' => $uh]);
+        global $wpdb;
+    $wpdb->delete(m3ut_t('links'), ['url_hash' => $uh]); // Dead link checker-er list-o theke muche dei
+    wp_send_json_success(['uh' => $uh, 'hist' => m3ut_hist_summary()]);
 });
 
 /* =====================================================================
@@ -452,6 +578,218 @@ function m3ut_chan_state_badge($uh) {
     return $out;
 }
 
+// Edit / Delete / Move save hoyar sathe sathe page nijei refresh hoy (hat-e reload korte hoy na).
+// Scroll position, list/grid view, search filter — shob ager moto thake. Onno edit box khola thakle refresh hoy na (jeno likha haray na).
+// Undo/Redo bar ke (reload chhara) update korar jonno chhoto summary
+function m3ut_hist_summary() {
+    $h = m3ut_hist_get();
+    $lu = $h['undo'] ? end($h['undo']) : null;
+    $lr = $h['redo'] ? end($h['redo']) : null;
+    return [
+        'nu' => count($h['undo']), 'nr' => count($h['redo']),
+        'lu' => $lu ? ['l' => $lu['l'], 't' => $lu['t']] : null,
+        'lr' => $lr ? ['l' => $lr['l'], 't' => $lr['t']] : null,
+    ];
+}
+
+// Save hoyar sathe sathe page update:
+//  - Duplicate naam tab-e DELETE korle page reload-i hoy na — row/group shorashori shore jay, apni jekhane chhilen sekhanei thakben.
+//  - Onno shob edit/delete/move-e page nijei refresh hoy, ar THIK ager jaygay fire ashe (screen-e jei row dekhchilen sheta-ke anchor dhori).
+//  Search filter, list/grid view ager moto thake. Onno edit box khola thakle refresh hoy na (jeno likha haray na).
+function m3ut_live_ui() {
+    if (m3ut_is_remote_path(m3ut_channels_file())) return; // remote source-e edit hoy na
+    ?>
+    <script>
+    (function () {
+        var KEY = 'm3ut_live_state', NAMEKEY = 'm3ut_live:';
+        var WATCH = { m3ut_chan_edit: 700, m3ut_chan_delete: 700, m3ut_chan_move: 1500 };
+        var ROWSEL = 'tr.m3ut-dup-row,tr.m3ut-chan-row,tr.m3ut-dchk-row,.m3ut-dup-card,.m3ut-chan-card,.m3ut-dchk-card';
+        var timer = null, moved = false, toastTimer = null;
+
+        function toast(txt, ok, ttl) {
+            var d = document.getElementById('m3ut-live-toast');
+            if (!d) {
+                d = document.createElement('div'); d.id = 'm3ut-live-toast';
+                d.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:100000;padding:10px 16px;border-radius:6px;color:#fff;font-weight:600;box-shadow:0 2px 10px rgba(0,0,0,.25)';
+                document.body.appendChild(d);
+            }
+            d.style.display = 'block';
+            d.style.background = ok ? '#00a32a' : '#dba617';
+            d.textContent = txt;
+            clearTimeout(toastTimer);
+            if (ttl) toastTimer = setTimeout(function () { d.style.display = 'none'; }, ttl);
+        }
+        function editOpen() {
+            var list = document.querySelectorAll('.m3ut-edit-row,.m3ut-dchk-edit-row,.m3ut-dup-edit-row,.m3ut-gcard-edit,.m3ut-dchk-gcard-edit,.m3ut-dup-gedit-box');
+            for (var i = 0; i < list.length; i++) if (list[i].offsetParent !== null) return true;
+            return false;
+        }
+        function gridId() {
+            var ids = ['m3ut-grid-wrap', 'm3ut-dchk-grid-wrap', 'm3ut-dup-grid-wrap'];
+            for (var i = 0; i < ids.length; i++) { var e = document.getElementById(ids[i]); if (e && e.offsetParent !== null) return ids[i]; }
+            return '';
+        }
+        /* ekhon screen-e jei channel row/card gulo dekha jachhe tader "anchor" hishebe rakhi (id + screen-er upor theke koto px niche) */
+        function anchors() {
+            var out = [], list = document.querySelectorAll(ROWSEL);
+            for (var i = 0; i < list.length && out.length < 8; i++) {
+                var el = list[i], k = el.getAttribute('data-uh');
+                if (!k || el.offsetParent === null) continue;
+                var r = el.getBoundingClientRect();
+                if (r.bottom <= 0 || r.top >= window.innerHeight) continue;
+                out.push({ k: k, t: Math.round(r.top) });
+            }
+            return out;
+        }
+        function saveState() {
+            var st = { q: location.search, y: window.pageYOffset || 0, grid: gridId(), f: {}, a: anchors() };
+            ['m3ut-filter', 'm3ut-dchk-filter', 'm3ut-dup-filter'].forEach(function (id) {
+                var e = document.getElementById(id); if (e && e.value) st.f[id] = e.value;
+            });
+            var raw = JSON.stringify(st);
+            try { sessionStorage.setItem(KEY, raw); } catch (e) { try { window.name = NAMEKEY + raw; } catch (e2) {} }
+            try { history.scrollRestoration = 'manual'; } catch (e) {}   // browser-er nijer scroll-restore bondho, amra-i korbo
+        }
+        function schedule(action) {
+            toast('✔ Save hoyeche — page update hocche…', true);
+            clearTimeout(timer);
+            timer = setTimeout(function () {
+                if (editOpen()) { toast('✔ Save hoyeche (onno edit box khola ache, tai auto-refresh holo na)', false); return; }
+                saveState();
+                location.reload();
+            }, WATCH[action]);
+        }
+
+        /* ---- Duplicate naam tab: delete hole reload chhara-i update ---- */
+        function setText(id, v) { var e = document.getElementById(id); if (e) e.textContent = v; }
+        function dupRecount() {
+            var left = {}, total = 0;
+            ['m3ut-dup-list-wrap', 'm3ut-dup-grid-wrap'].forEach(function (wid, idx) {
+                var w = document.getElementById(wid); if (!w) return;
+                var sel = idx === 0 ? '.m3ut-dup-row' : '.m3ut-dup-card';
+                [].slice.call(w.querySelectorAll('.m3ut-dup-group')).forEach(function (g) {
+                    var n = g.querySelectorAll(sel).length;
+                    if (n < 2) { g.remove(); return; }                       // ar duplicate nei — group shore jay
+                    var bd = g.querySelector('h3 span'); if (bd) bd.textContent = n + 'x duplicate';
+                    if (idx === 0) { left[g.getAttribute('data-name')] = n; total += n; }
+                });
+            });
+            var N = Object.keys(left).length;
+            setText('m3ut-dup-n', N); setText('m3ut-dup-m', total);
+            var kEl = document.getElementById('m3ut-dup-k');
+            if (kEl) kEl.textContent = Math.max(0, (parseInt(kEl.textContent, 10) || 0) - 1);
+            var nav = document.querySelector('.nav-tab-wrapper a[href*="tab=duplicate"] span');
+            if (nav) { if (N) nav.textContent = N; else nav.remove(); }
+            if (!N) {
+                var lw = document.getElementById('m3ut-dup-list-wrap'), gw = document.getElementById('m3ut-dup-grid-wrap');
+                if (lw) lw.innerHTML = '<div class="m3ut-card"><p>🎉 Kono duplicate naam nei — shob channel-er naam unique.</p></div>';
+                if (gw) gw.style.display = 'none';
+                var f = document.getElementById('m3ut-dup-filter'), card = f && f.closest('.m3ut-card');
+                if (card) card.style.display = 'none';
+            }
+        }
+        function histUpdate(h) {
+            if (!h) return;
+            [['m3ut-hist-undo', '↶ Undo', h.nu, h.lu], ['m3ut-hist-redo', '↷ Redo', h.nr, h.lr]].forEach(function (x) {
+                var b = document.getElementById(x[0]); if (!b) return;
+                b.textContent = x[1] + (x[3] ? ' — ' + x[3].l : '');
+                b.disabled = !x[2]; b.setAttribute('data-on', x[2] ? '1' : '0'); b.title = x[3] ? x[3].t : '';
+            });
+            var d = document.querySelector('#m3ut-hist-bar .description');
+            if (d) d.textContent = h.nu + ' step undo-te · ' + h.nr + ' step redo-te (edit / delete / move / add shob-i dhora hoy)';
+        }
+        function dupRemove(uh, hist) {
+            setTimeout(function () {                                         // tab-er nijer handler-er por cholbe
+                [].slice.call(document.querySelectorAll('.m3ut-dup-row,.m3ut-dup-card')).forEach(function (el) {
+                    if (el.getAttribute('data-uh') !== uh) return;
+                    var nx = el.nextElementSibling;
+                    if (el.tagName === 'TR' && nx && nx.classList.contains('m3ut-dup-edit-row')) nx.remove();
+                    el.remove();
+                });
+                dupRecount();
+                histUpdate(hist);
+                toast('✔ Delete hoyeche', true, 1800);
+            }, 40);
+        }
+
+        /* fetch-er upor nojor rakhi: channel edit/delete/move shofol hole kaj kori */
+        var origFetch = window.fetch;
+        window.fetch = function (input, init) {
+            var p = origFetch.apply(this, arguments);
+            try {
+                var body = init && init.body;
+                var action = (body && typeof body.get === 'function') ? body.get('action') : '';
+                if (action === 'm3ut_chan_delete' && document.getElementById('m3ut-dup-list-wrap')) {
+                    var duh = body.get('uh');                                // Duplicate tab: reload nai
+                    p.then(function (resp) {
+                        return resp.clone().json().then(function (res) { if (res && res.success) dupRemove(duh, res.data && res.data.hist); });
+                    }).catch(function () {});
+                } else if (action && WATCH.hasOwnProperty(action)) {
+                    p.then(function (resp) {
+                        return resp.clone().json().then(function (res) { if (res && res.success) schedule(action); });
+                    }).catch(function () {});
+                }
+            } catch (e) {}
+            return p;
+        };
+
+        /* ---- refresh-er por ager jaygay fire ana ---- */
+        function findByKey(k) {
+            var list = document.querySelectorAll(ROWSEL);
+            for (var i = 0; i < list.length; i++) if (list[i].offsetParent !== null && list[i].getAttribute('data-uh') === k) return list[i];
+            return null;
+        }
+        function place(st) {
+            var a = st.a || [];
+            for (var i = 0; i < a.length; i++) {              // prothom je anchor ekhono ache, sheta ager screen-position-e ana
+                var el = findByKey(a[i].k);
+                if (el) { window.scrollTo(0, (window.pageYOffset || 0) + el.getBoundingClientRect().top - a[i].t); return; }
+            }
+            window.scrollTo(0, st.y || 0);                    // kono anchor-i nei hole ager scroll-er jaygay
+        }
+        function loadState() {
+            var raw = null;
+            try { raw = sessionStorage.getItem(KEY); sessionStorage.removeItem(KEY); } catch (e) {}
+            if (!raw && typeof window.name === 'string' && window.name.indexOf(NAMEKEY) === 0) { raw = window.name.slice(NAMEKEY.length); window.name = ''; }
+            if (!raw) return null;
+            try { var st = JSON.parse(raw); return (st && st.q === location.search) ? st : null; } catch (e) { return null; }
+        }
+
+        var st = loadState();
+        try { history.scrollRestoration = 'auto'; } catch (e) {}
+        if (!st) return;
+        ['wheel', 'touchstart', 'keydown', 'mousedown'].forEach(function (t) {
+            window.addEventListener(t, function () { moved = true; }, { passive: true, once: true });   // apni nije scroll korle ar jor kori na
+        });
+
+        var fkeys = Object.keys(st.f || {}), settled = false, ticks = 0;
+        /* page poro-poro ses hoyar age-i (CDN script dhimi hole-o) jaygay niye jai; list/search chhara obosthay */
+        var poll = setInterval(function () {
+            ticks++;
+            if (moved || settled || ticks > 150) { clearInterval(poll); return; }
+            if (!st.grid && !fkeys.length) place(st);
+        }, 100);
+
+        function afterReady() {
+            fkeys.forEach(function (id) {
+                var e = document.getElementById(id);
+                if (e) { e.value = st.f[id]; e.dispatchEvent(new Event('input', { bubbles: true })); }
+            });
+            if (st.grid) {
+                var map = { 'm3ut-grid-wrap': 'm3ut-view-grid', 'm3ut-dchk-grid-wrap': 'm3ut-dchk-view-grid', 'm3ut-dup-grid-wrap': 'm3ut-dup-view-grid' };
+                var b = map[st.grid] ? document.getElementById(map[st.grid]) : null;
+                if (b) b.click();
+            }
+            [0, 150, 500, 1200].forEach(function (d) { setTimeout(function () { if (!moved) place(st); }, d); });
+            setTimeout(function () { settled = true; }, 1500);
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', afterReady); else afterReady();
+        window.addEventListener('load', function () { if (!moved) place(st); });
+    })();
+    </script>
+    <?php
+}
+
 function m3ut_page_channels() {
     m3ut_cap();
     $tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'checker';
@@ -477,6 +815,8 @@ function m3ut_page_channels() {
        . '<a class="nav-tab ' . ($tab === 'list' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=list') . '">Sob channel (list/grid)</a>'
        . '<a class="nav-tab ' . ($tab === 'duplicate' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=duplicate') . '">🧬 Duplicate naam' . ($dupNameCount ? ' <span style="background:#8e44ad;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:2px">' . $dupNameCount . '</span>' : '') . '</a>'
        . '<a class="nav-tab ' . ($tab === 'editor' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=editor') . '">channels.txt editor</a></h2>';
+           m3ut_history_ui();
+               m3ut_live_ui();
     if ($tab === 'editor') m3ut_tab_editor();
     elseif ($tab === 'list') m3ut_tab_list();
     elseif ($tab === 'duplicate') m3ut_tab_duplicate();
@@ -485,8 +825,64 @@ function m3ut_page_channels() {
     echo '</div>';
 }
 
+// Dead link checker-er list (links table) shob shomoy channels file-er shathe mil kore rakhi.
+// Edit / delete / move / undo / bulk — ja-i hok, file-ei source of truth; ekhane shudhu sheta DB-te protifolito hoy.
+// File bodlay ni hole kichu-i kori na (shesh sync-er signature mile gele skip), tai page dhimi hoy na.
+function m3ut_links_sync() {
+    global $wpdb;
+    $chs = m3ut_read_channels();
+    if ($chs === null) return;                                                  // file pawa jayni — kichu mucha jabe na
+    if (!$chs && m3ut_is_remote_path(m3ut_channels_file())) return;             // remote khali ashle bhul dhore nei, kichu muchi na
+    $t = m3ut_t('links');
+
+    $seen = [];
+    foreach ($chs as $c) {
+        if (isset($seen[$c['uh']])) continue;                                   // ek-i URL duibar thakle prothomta
+        $seen[$c['uh']] = [
+            'chash' => $c['hash'],
+            'name'  => mb_strcut((string) $c['name'], 0, 190, 'UTF-8'),
+            'group' => mb_strcut((string) $c['group'], 0, 100, 'UTF-8'),
+            'url'   => $c['url'],
+            'seq'   => isset($c['no']) ? (int) $c['no'] : 0,
+        ];
+    }
+    $sig = md5(wp_json_encode($seen));
+    $cnt = (int) $wpdb->get_var("SELECT COUNT(*) FROM $t");
+    if ($cnt === count($seen) && get_option('m3ut_links_sig') === $sig) return; // kono poriborton nei
+
+    $ex = $wpdb->get_results("SELECT url_hash, cname, cgroup, seq FROM $t", OBJECT_K);
+    $ex = is_array($ex) ? $ex : [];
+
+    // 1) notun channel / URL bodle gele (notun hash) — "Check hoyni" hishebe jog
+    $new = [];
+    foreach ($seen as $uh => $r) if (!isset($ex[$uh])) $new[$uh] = $r;
+    foreach (array_chunk($new, 100, true) as $chunk) {
+        $vals = [];
+        foreach ($chunk as $uh => $r) $vals[] = $wpdb->prepare("(%s, %s, %s, %s, %s, %d, 'unknown')", $uh, $r['chash'], $r['name'], $r['group'], $r['url'], $r['seq']);
+        $wpdb->query("INSERT INTO $t (url_hash, chash, cname, cgroup, url, seq, status) VALUES " . implode(',', $vals)
+            . " ON DUPLICATE KEY UPDATE chash=VALUES(chash), cname=VALUES(cname), cgroup=VALUES(cgroup), seq=VALUES(seq)");
+    }
+
+    // 2) naam / group / position bodlale update
+    foreach ($seen as $uh => $r) {
+        if (!isset($ex[$uh])) continue;
+        $o = $ex[$uh];
+        if ($o->cname !== $r['name'] || $o->cgroup !== $r['group'] || (int) $o->seq !== $r['seq']) {
+            $wpdb->update($t, ['cname' => $r['name'], 'cgroup' => $r['group'], 'seq' => $r['seq']], ['url_hash' => $uh]);
+        }
+    }
+
+    // 3) file-e ar nei emon channel muche dei
+    $stale = array_values(array_diff(array_keys($ex), array_keys($seen)));
+    foreach (array_chunk($stale, 200) as $chunk) {
+        $wpdb->query($wpdb->prepare("DELETE FROM $t WHERE url_hash IN (" . implode(',', array_fill(0, count($chunk), '%s')) . ")", $chunk));
+    }
+    update_option('m3ut_links_sig', $sig, false);
+}
+
 function m3ut_tab_checker() {
     global $wpdb;
+        m3ut_links_sync(); // Dead link checker-er list ke channels file-er shathe mil kori
     $t = m3ut_t('links');
     $st = m3ut_scan_state();
     $left = isset($st['queue']) ? count($st['queue']) : 0;
@@ -616,7 +1012,7 @@ function m3ut_tab_checker() {
                         <p class="m3ut-dchk-g-namep" style="font-weight:700;margin:8px 0 2px;word-break:break-word"><?php echo esc_html($r->cname); ?></p>
                         <?php if (isset($dupNames[$r->cname])): ?><p style="margin:0 0 4px"><?php echo m3ut_badge('🧬 Duplicate', '#8e44ad'); ?></p><?php endif; ?>
                         <p style="margin:0 0 6px;font-size:12px"><strong style="font-size:18px;font-weight:800"><?php echo $r->seq ? (int) $r->seq : '—'; ?></strong> <span style="opacity:.7">· <?php echo esc_html($r->cgroup ?: '—'); ?></span></p>
-                        <p style="margin:0 0 8px"><?php echo m3ut_badge($r->status, $col); ?> <?php if ((int) $r->http_code): ?><span style="font-size:11px;opacity:.7;margin-left:4px">HTTP <?php echo (int) $r->http_code; ?></span><?php endif; ?></p>
+                                                <p style="margin:0 0 8px"><?php echo m3ut_badge($r->status, $col); ?> <?php echo m3ut_chan_uptime_badge($r->url_hash); ?> <?php if ((int) $r->http_code): ?><span style="font-size:11px;opacity:.7;margin-left:4px">HTTP <?php echo (int) $r->http_code; ?></span><?php endif; ?></p>
                         <?php if ($r->error): ?><p style="margin:0 0 8px;font-size:11px;color:#b32d2e"><?php echo esc_html($r->error); ?></p><?php endif; ?>
                         <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
                             <button type="button" class="button button-small m3ut-btn-test" data-url="<?php echo esc_attr($r->url); ?>" data-name="<?php echo esc_attr($r->cname); ?>">▶ Play</button>
@@ -993,7 +1389,7 @@ function m3ut_tab_list() {
             <tbody>
             <?php foreach ($chs as $c): ?>
                 <tr class="m3ut-chan-row" data-uh="<?php echo esc_attr($c['uh']); ?>" data-name="<?php echo esc_attr(strtolower($c['name'] . ' ' . $c['group'])); ?>">
-                    <td data-col="no" style="font-size:16px;font-weight:600"><?php echo (int) $c['no']; ?></td>
+                    <td data-col="no" style="font-size:18px;font-weight:800"><?php echo (int) $c['no']; ?></td>
                     <td data-col="logo"><?php echo $c['logo'] ? '<img src="' . esc_url($c['logo']) . '" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' : '—'; ?></td>
                     <td data-col="name" class="m3ut-c-name"><strong><?php echo esc_html($c['name']); ?></strong> <?php echo m3ut_chan_state_badge($c['uh']); ?>
                         <?php $__k = m3ut_norm_name($c['name']); if ($__k !== '' && !empty($nameCounts[$__k]) && $nameCounts[$__k] > 1): ?>
@@ -1039,7 +1435,7 @@ function m3ut_tab_list() {
                         <?php $__k = m3ut_norm_name($c['name']); if ($__k !== '' && !empty($nameCounts[$__k]) && $nameCounts[$__k] > 1): ?>
                             <p style="margin:0 0 4px"><?php echo m3ut_badge('🧬 ' . $nameCounts[$__k] . 'x dup', '#8e44ad'); ?></p>
                         <?php endif; ?>
-                        <p style="margin:0 0 8px;font-size:12px"><strong style="font-size:16px;font-weight:600"><?php echo (int) $c['no']; ?></strong> <span style="opacity:.7">· <?php echo esc_html($c['group'] ?: '—'); ?></span></p>
+                        <p style="margin:0 0 8px;font-size:12px"><strong style="font-size:18px;font-weight:800"><?php echo (int) $c['no']; ?></strong> <span style="opacity:.7">· <?php echo esc_html($c['group'] ?: '—'); ?></span></p>
                         <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
                             <button type="button" class="button button-small m3ut-btn-test" data-url="<?php echo esc_attr($c['url']); ?>" data-name="<?php echo esc_attr($c['name']); ?>">▶ Test</button>
                             <?php if (!$remote): ?>
@@ -1297,7 +1693,7 @@ function m3ut_tab_list() {
                     document.querySelectorAll('#m3ut-chan-table tbody tr.m3ut-chan-row').forEach(function (r) {
                         n++;
                         var c = r.querySelector('td[data-col="no"]');
-                        if (c) c.textContent = '#' + n;
+                        if (c) c.textContent = n;
                     });
                 })
                 .catch(function () { b.disabled = false; alert('Network error, abar try korun'); });
@@ -1405,7 +1801,7 @@ function m3ut_tab_duplicate() {
     </style>
 
     <div class="m3ut-card" style="margin-top:16px">
-        <p><strong><?php echo count($dupGroups); ?></strong> ta naam-e duplicate paowa gyeche · total <strong><?php echo $dupChannelCount; ?></strong> ta channel affected (shob <?php echo count($chs); ?> ta channel-er moddhe).</p>
+        <p><strong id="m3ut-dup-n"><?php echo count($dupGroups); ?></strong> ta naam-e duplicate paowa gyeche · total <strong id="m3ut-dup-m"><?php echo $dupChannelCount; ?></strong> ta channel affected (shob <span id="m3ut-dup-k"><?php echo count($chs); ?></span> ta channel-er moddhe).</p>
         <p class="description">Naam-er case ar extra space bad diye match kora hoyeche (jemon "BTV" ar " btv" ekই dhora hobe). Niche prottek group-e shei naam-er shob-koyta channel dekhano hocche — shadharonoto ekta rekhe baki-gulo delete kore dile hoye jay.</p>
         <?php if ($remote): ?>
             <p class="description" style="color:#b32d2e"><?php echo esc_html(m3ut_remote_block_msg()); ?> (test-play cholbe, edit/delete noy)</p>
@@ -1440,7 +1836,7 @@ function m3ut_tab_duplicate() {
         <tbody>
         <?php foreach ($g as $c): ?>
             <tr class="m3ut-dup-row" data-uh="<?php echo esc_attr($c['uh']); ?>">
-                <td data-col="no" style="font-size:16px;font-weight:800"><?php echo (int) $c['no']; ?></td>
+                <td data-col="no" style="font-size:18px;font-weight:800"><?php echo (int) $c['no']; ?></td>
                 <td data-col="logo"><?php echo $c['logo'] ? '<img src="' . esc_url($c['logo']) . '" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' : '—'; ?></td>
                 <td data-col="name" class="m3ut-dup-name"><strong><?php echo esc_html($c['name']); ?></strong> <?php echo m3ut_chan_state_badge($c['uh']); ?></td>
                 <td data-col="group" class="m3ut-dup-groupc"><?php echo esc_html($c['group']); ?></td>
@@ -1484,7 +1880,7 @@ function m3ut_tab_duplicate() {
                     <img class="m3ut-dup-g-logo-img" src="<?php echo esc_url($c['logo']); ?>" style="width:56px;height:56px;object-fit:cover;border-radius:8px;<?php echo $c['logo'] ? '' : 'display:none'; ?>" onerror="this.style.display='none'">
                     <p class="m3ut-dup-g-namep" style="font-weight:700;margin:8px 0 2px;word-break:break-word"><?php echo esc_html($c['name']); ?></p>
                     <?php $__sb = m3ut_chan_state_badge($c['uh']); if ($__sb) echo '<p style="margin:0 0 4px">' . $__sb . '</p>'; ?>
-                    <p style="margin:0 0 8px;font-size:12px"><strong style="font-size:16px;font-weight:800"><?php echo (int) $c['no']; ?></strong> <span style="opacity:.7">· <?php echo esc_html($c['group'] ?: '—'); ?></span></p>
+                    <p style="margin:0 0 8px;font-size:12px"><strong style="font-size:18px;font-weight:800"><?php echo (int) $c['no']; ?></strong> <span style="opacity:.7">· <?php echo esc_html($c['group'] ?: '—'); ?></span></p>
                     <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
                         <button type="button" class="button button-small m3ut-btn-test" data-url="<?php echo esc_attr($c['url']); ?>" data-name="<?php echo esc_attr($c['name']); ?>">▶ Test</button>
                         <?php if (!$remote): ?>
