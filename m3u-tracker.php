@@ -1,9 +1,13 @@
 <?php
 /**
  * Plugin Name: M3U Tracker
+  * Plugin URI: https://goodly.com.bd
  * Description: m3u/iptv playlist tracker: reseller manager, customer keys, kill switch, live counter, channel stats, dead link checker, Telegram/email alerts, channels.txt editor.
  * Version: 3.5.0
+  * Update URI: https://goodly.com.bd
  * Author: Goodly BD
+ * Author URI: https://goodly.com.bd
+ * Requires PHP:      7.4
  */
 
 if (!defined('ABSPATH')) exit;
