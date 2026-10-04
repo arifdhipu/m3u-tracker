@@ -66,6 +66,12 @@ function m3ut_scan_start() {
         ));
         $queue[] = $c['uh'];
     }
+        m3ut_dup_boot();
+    foreach (m3ut_ds_get() as $c) {   // Duplicate Section-er channel gulo-o scan hobe (alada status, Dead checker list-e dekhabe na)
+        if (isset($seen[$c['uh']])) continue;
+        $seen[$c['uh']] = 1;
+        $queue[] = $c['uh'];
+    }
     if ($queue) {
         // list theke soriye fela channel-er row muche dei
         $in = "'" . implode("','", $queue) . "'";
@@ -92,7 +98,7 @@ function m3ut_scan_batch($n = 6) {
     for ($i = 0; $i < $n && !empty($st['queue']) && (microtime(true) - $t0) < 20; $i++) {
         $h = array_shift($st['queue']);
         $row = $wpdb->get_row($wpdb->prepare("SELECT * FROM $t WHERE url_hash=%s", $h));
-        if (!$row) continue;
+                if (!$row) { m3ut_dup_boot(); m3ut_ds_check($h, $st); continue; } // Duplicate Section-er channel hole alada check
         list($res, $code, $err) = m3ut_check_url($row->url);
         $now = m3ut_now();
         if ($res === 'ok') {
@@ -118,6 +124,7 @@ function m3ut_scan_batch($n = 6) {
             m3ut_alert("💀 Notun dead channel (" . count($st['newdead']) . "ta)\n- " . implode("\n- ", $names) . "\n\nMot dead ekhon: $total_dead", 'Dead channels found');
         }
         $st['newdead'] = [];
+                try { m3ut_dup_boot(); m3ut_dup_autosort(); } catch (\Throwable $e) {} // scan shesh: prothom active ta main-e, baki duplicate Section-e
     }
     update_option('m3ut_scan', $st, false);
     delete_transient('m3ut_scan_lock');
@@ -190,4 +197,10 @@ function m3ut_scan_step_endpoint() {
     $st = m3ut_scan_drain(45);
     if (!empty($st['queue'])) m3ut_trigger_next_step();
     exit;
+}
+
+
+// Duplicate Section-er code admin-channels.php-te; cron/tv.php (non-admin) request-eo lage tai dorkar hole load kori
+function m3ut_dup_boot() {
+    if (!function_exists('m3ut_dup_autosort')) require_once M3UT_DIR . 'includes/admin-channels.php';
 }

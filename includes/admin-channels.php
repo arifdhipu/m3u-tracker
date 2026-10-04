@@ -793,7 +793,7 @@ function m3ut_live_ui() {
 function m3ut_page_channels() {
     m3ut_cap();
     $tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'checker';
-    if (!in_array($tab, ['checker', 'editor', 'list', 'duplicate'], true)) $tab = 'checker';
+        if (!in_array($tab, ['checker', 'editor', 'list', 'duplicate', 'dupstore'], true)) $tab = 'checker';
     $u = admin_url('admin.php?page=m3ut-channels');
 
     // nav tab-e "koyta duplicate naam ache" ta dekhanor jonno dhoro count
@@ -809,16 +809,19 @@ function m3ut_page_channels() {
         foreach ($cnt as $n) if ($n > 1) $dupNameCount++;
     }
 
+    $dsCount = count(m3ut_ds_get());
     echo '<div class="wrap"><h1>📡 Channels</h1>';
     m3ut_notice();
     echo '<h2 class="nav-tab-wrapper"><a class="nav-tab ' . ($tab === 'checker' ? 'nav-tab-active' : '') . '" href="' . esc_url($u) . '">Dead link checker</a>'
        . '<a class="nav-tab ' . ($tab === 'list' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=list') . '">Sob channel (list/grid)</a>'
        . '<a class="nav-tab ' . ($tab === 'duplicate' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=duplicate') . '">🧬 Duplicate naam' . ($dupNameCount ? ' <span style="background:#8e44ad;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:2px">' . $dupNameCount . '</span>' : '') . '</a>'
+              . '<a class="nav-tab ' . ($tab === 'dupstore' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=dupstore') . '">📦 Duplicate Section' . ($dsCount ? ' <span style="background:#2271b1;color:#fff;border-radius:10px;padding:1px 7px;font-size:11px;margin-left:2px">' . $dsCount . '</span>' : '') . '</a>'
        . '<a class="nav-tab ' . ($tab === 'editor' ? 'nav-tab-active' : '') . '" href="' . esc_url($u . '&tab=editor') . '">channels.txt editor</a></h2>';
            m3ut_history_ui();
                m3ut_live_ui();
     if ($tab === 'editor') m3ut_tab_editor();
     elseif ($tab === 'list') m3ut_tab_list();
+    elseif ($tab === 'duplicate') m3ut_tab_duplicate();
     elseif ($tab === 'duplicate') m3ut_tab_duplicate();
     else m3ut_tab_checker();
         if ($tab !== 'editor') m3ut_bulk_ui();
@@ -1803,6 +1806,7 @@ function m3ut_tab_duplicate() {
     <div class="m3ut-card" style="margin-top:16px">
         <p><strong id="m3ut-dup-n"><?php echo count($dupGroups); ?></strong> ta naam-e duplicate paowa gyeche · total <strong id="m3ut-dup-m"><?php echo $dupChannelCount; ?></strong> ta channel affected (shob <span id="m3ut-dup-k"><?php echo count($chs); ?></span> ta channel-er moddhe).</p>
         <p class="description">Naam-er case ar extra space bad diye match kora hoyeche (jemon "BTV" ar " btv" ekই dhora hobe). Niche prottek group-e shei naam-er shob-koyta channel dekhano hocche — shadharonoto ekta rekhe baki-gulo delete kore dile hoye jay.</p>
+                <?php m3ut_dup_collect_box($dupGroups, $remote); ?>
         <?php if ($remote): ?>
             <p class="description" style="color:#b32d2e"><?php echo esc_html(m3ut_remote_block_msg()); ?> (test-play cholbe, edit/delete noy)</p>
         <?php endif; ?>
@@ -2213,4 +2217,311 @@ function m3ut_tab_editor() {
         <?php endforeach; ?>
         </tbody></table>
     <?php endif;
+}
+
+/* =====================================================================
+   DUPLICATE SECTION (v2 — scan-er por auto)
+   Rule: ekoi naam-er channel-er moddhe prothom ACTIVE (scan-e ok) ta main playlist-e thake,
+   baki gulo ei alada section-e jay. Section-er channel live playlist / go-link-e jay na.
+   Porer scan-e section-er channel-gulo-o check hoy; kono section channel active hoye main-er
+   channel dead hole auto-ei adol-bodol hoye jay.
+   ===================================================================== */
+function m3ut_ds_get() {
+    $raw = get_option('m3ut_dup_store', '');
+    return (is_string($raw) && trim($raw) !== '') ? m3ut_parse($raw) : [];
+}
+function m3ut_ds_save($chs) {
+    update_option('m3ut_dup_store', $chs ? m3ut_channels_to_raw($chs) : '', false);
+}
+function m3ut_ds_main() {
+    $f = m3ut_channels_file();
+    return is_readable($f) ? m3ut_parse((string) file_get_contents($f)) : null;
+}
+function m3ut_ds_status_map() {
+    $m = get_option('m3ut_dup_status', []);
+    return is_array($m) ? $m : [];
+}
+function m3ut_dup_auto_on() { return get_option('m3ut_dup_auto', 'on') !== 'off'; }
+
+/* Scan queue theke ashe: section-er ekta channel check kore status rakhe (links table-e dhukay na, tai Dead checker list-e dekhay na) */
+function m3ut_ds_check($h, &$st) {
+    $found = null;
+    foreach (m3ut_ds_get() as $c) { if ($c['uh'] === $h) { $found = $c; break; } }
+    if (!$found) return;
+    list($res, $code, $err) = m3ut_check_url($found['url']);
+    if ($res === 'dead' && empty($st['retry'][$h])) { $st['retry'][$h] = 1; $st['queue'][] = $h; return; } // prothom fail-e ekbar retry
+    $map = m3ut_ds_status_map();
+    $map[$h] = ['s' => $res, 'c' => (int) $code, 'e' => substr((string) $err, 0, 180), 't' => m3ut_now()];
+    update_option('m3ut_dup_status', $map, false);
+}
+
+function m3ut_dup_rank($s) { return $s === 'ok' ? 0 : ($s === 'dead' ? 2 : 1); } // ok age, tarpor check-hoyni/skip, shesh-e dead
+
+/* Main + section milie: prottek naam-e prothom active ta main-e, baki gulo section-e.
+   Return: false (kichu kora jayni) ba ['moved' => N, 'promoted' => M] */
+function m3ut_dup_autosort($force = false) {
+    global $wpdb;
+    if (!$force && !m3ut_dup_auto_on()) return false;
+    $file = m3ut_channels_file();
+    if (m3ut_is_remote_path($file) || !is_readable($file)) return false;
+    $main = m3ut_parse((string) file_get_contents($file));
+    if (!$main) return false;
+    $store = m3ut_ds_get();
+    $ds = m3ut_ds_status_map();
+    $lt = m3ut_t('links');
+    $ls = [];
+    foreach ((array) $wpdb->get_results("SELECT url_hash, status, http_code, error, last_checked, last_ok FROM $lt") as $r) $ls[$r->url_hash] = $r;
+
+    $inMain = [];
+    foreach ($main as $c) $inMain[$c['uh']] = 1;
+
+    // network/server down hole shob dead dekhabe — ei obosthay bhul kore adol-bodol na kori (auto-er khetre)
+    if (!$force) {
+        $chk = 0; $dd = 0;
+        foreach ($main as $c) { $s = isset($ls[$c['uh']]) ? $ls[$c['uh']]->status : ''; if ($s === 'ok' || $s === 'dead') { $chk++; if ($s === 'dead') $dd++; } }
+        if ($chk >= 10 && $dd * 100 >= $chk * 90) return false;
+    }
+
+    // naam onujayi group (main age, tarpor section)
+    $cand = [];
+    foreach ($main as $i => $c) {
+        $k = m3ut_norm_name($c['name']);
+        if ($k === '') continue;
+        $cand[$k][] = ['src' => 'm', 'pos' => $i, 'c' => $c, 's' => isset($ls[$c['uh']]) ? $ls[$c['uh']]->status : 'unknown'];
+    }
+    $seenS = [];
+    foreach ($store as $j => $c) {
+        if (isset($inMain[$c['uh']]) || isset($seenS[$c['uh']])) continue;   // main-e ek-i URL thakle ba repeat hole candidate noy
+        $seenS[$c['uh']] = 1;
+        $k = m3ut_norm_name($c['name']);
+        if (!isset($cand[$k])) continue;                                     // main-e ei naam-er kono channel nei — section-ei thakuk
+        $cand[$k][] = ['src' => 's', 'pos' => 1000000 + $j, 'c' => $c, 's' => isset($ds[$c['uh']]['s']) ? $ds[$c['uh']]['s'] : 'unknown'];
+    }
+
+    $drop = []; $promote = [];
+    foreach ($cand as $g) {
+        if (count($g) < 2) continue;
+        usort($g, function ($a, $b) {
+            $ra = m3ut_dup_rank($a['s']); $rb = m3ut_dup_rank($b['s']);
+            return $ra !== $rb ? $ra <=> $rb : $a['pos'] <=> $b['pos'];
+        });
+        $win = $g[0];
+        $mp = [];
+        foreach ($g as $m) if ($m['src'] === 'm') $mp[] = $m['pos'];
+        if (!$mp) continue;
+        if ($win['src'] === 'm') {
+            foreach ($g as $m) if ($m['src'] === 'm' && $m['pos'] !== $win['pos']) $drop[$m['pos']] = $m;
+        } else {
+            $first = min($mp);
+            $promote[$first] = $win;                                         // section-er active ta main-er prothom channel-er jaygay boshbe
+            foreach ($g as $m) if ($m['src'] === 'm') $drop[$m['pos']] = $m;
+        }
+    }
+    if (!$drop) return ['moved' => 0, 'promoted' => 0];
+
+    $new = [];
+    foreach ($main as $i => $c) {
+        if (isset($promote[$i])) { $new[] = $promote[$i]['c']; continue; }
+        if (isset($drop[$i])) continue;
+        $new[] = $c;
+    }
+    $promUh = [];
+    foreach ($promote as $p) $promUh[$p['c']['uh']] = 1;
+    ksort($drop);
+    $newStore = []; $have = []; $newDs = $ds;
+    foreach ($store as $c) {
+        if (isset($promUh[$c['uh']])) continue;
+        $newStore[] = $c; $have[$c['uh']] = 1;
+    }
+    foreach ($drop as $d) {
+        $uh = $d['c']['uh'];
+        if (isset($ls[$uh])) {                                               // main-e thakar shomoy-er status section-e niye jai
+            $r = $ls[$uh];
+            $newDs[$uh] = ['s' => $r->status, 'c' => (int) $r->http_code, 'e' => (string) $r->error, 't' => (string) $r->last_checked];
+        }
+        if (isset($have[$uh])) continue;
+        $newStore[] = $d['c']; $have[$uh] = 1;
+    }
+
+    $oldStoreRaw = get_option('m3ut_dup_store', '');
+    m3ut_ds_save($newStore);                                                 // age section-e rakhi, tarpor main-e likhi (kichu haray na)
+    if (!m3ut_write_channels(m3ut_channels_to_raw($new))) { update_option('m3ut_dup_store', $oldStoreRaw, false); return false; }
+
+    foreach (array_keys($newDs) as $k) if (!isset($have[$k])) unset($newDs[$k]);
+    update_option('m3ut_dup_status', $newDs, false);
+
+    m3ut_links_sync();                                                       // Dead checker list-o mil kore dei
+    foreach ($promote as $p) {                                               // notun main-e ashar por status "Check hoyni" na hoye ager status-i thakuk
+        $uh = $p['c']['uh'];
+        if (empty($ds[$uh]['s'])) continue;
+        $r = $ds[$uh];
+        $row = ['status' => in_array($r['s'], ['ok', 'dead', 'skip'], true) ? $r['s'] : 'unknown', 'http_code' => (int) $r['c'], 'error' => (string) $r['e']];
+        if (!empty($r['t'])) { $row['last_checked'] = $r['t']; if ($r['s'] === 'ok') $row['last_ok'] = $r['t']; }
+        $wpdb->update($lt, $row, ['url_hash' => $uh]);
+    }
+    $sum = ['moved' => count($drop), 'promoted' => count($promote)];
+    update_option('m3ut_dup_last', ['t' => m3ut_now(), 'm' => $sum['moved'], 'p' => $sum['promoted']], false);
+    return $sum;
+}
+
+/* ---------- Duplicate naam tab-er button box ---------- */
+function m3ut_dup_collect_box($dupGroups, $remote) {
+    $extra = 0;
+    foreach ($dupGroups as $g) $extra += count($g) - 1;
+    if ($remote || $extra < 1) return;
+    ?>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:12px 0 0;padding:10px 12px;border:1px solid #8e44ad;border-radius:6px;background:#faf5fc"
+          onsubmit="return confirm('Prottek duplicate naam-er prothom ACTIVE (scan onujayi) channel rekhe baki <?php echo (int) $extra; ?> ta channel main playlist theke Duplicate Section-e jabe. Cholbe?');">
+        <input type="hidden" name="action" value="m3ut_ds_collect">
+        <?php wp_nonce_field('m3ut_ds_collect'); ?>
+        <button type="submit" class="button button-primary" style="background:#8e44ad;border-color:#8e44ad">📦 Prothom active ta rekhe baki <?php echo (int) $extra; ?> ta duplicate Duplicate Section-e move korun</button>
+        <span class="description" style="margin-left:8px">Scan er por eta auto-o hoy (Duplicate Section tab-e on/off kora jay).</span>
+    </form>
+    <?php
+}
+
+/* ---------- Ekhoni sort (manual) ---------- */
+add_action('admin_post_m3ut_ds_collect', function () {
+    m3ut_cap(); check_admin_referer('m3ut_ds_collect');
+    if (m3ut_is_remote_path(m3ut_channels_file())) m3ut_back('m3ut-channels', m3ut_remote_block_msg(), 'error', ['tab' => 'duplicate']);
+    $r = m3ut_dup_autosort(true);
+    if ($r === false) m3ut_back('m3ut-channels', 'File likha jayni. channels file pawa jay kina / writable kina check korun.', 'error', ['tab' => 'duplicate']);
+    if (!$r['moved']) m3ut_back('m3ut-channels', 'Kono duplicate naam nei, kichu move korar dorkar nei', 'success', ['tab' => 'duplicate']);
+    m3ut_back('m3ut-channels', $r['moved'] . ' ta channel Duplicate Section-e move hoyeche' . ($r['promoted'] ? ' (section theke ' . $r['promoted'] . ' ta active channel main-e eshechhe)' : '') . '.', 'success', ['tab' => 'dupstore']);
+});
+
+/* ---------- Auto on/off ---------- */
+add_action('admin_post_m3ut_ds_toggle', function () {
+    m3ut_cap(); check_admin_referer('m3ut_ds_toggle');
+    update_option('m3ut_dup_auto', m3ut_dup_auto_on() ? 'off' : 'on', false);
+    m3ut_back('m3ut-channels', 'Scan-er por auto duplicate move ekhon ' . (m3ut_dup_auto_on() ? 'ON' : 'OFF'), 'success', ['tab' => 'dupstore']);
+});
+
+/* ---------- Duplicate Section theke: move / copy to main, ba delete ---------- */
+add_action('admin_post_m3ut_ds_action', function () {
+    m3ut_cap(); check_admin_referer('m3ut_ds_action');
+    $do  = isset($_POST['do']) ? sanitize_key($_POST['do']) : '';
+    $sel = isset($_POST['uh']) ? array_map('sanitize_text_field', (array) wp_unslash($_POST['uh'])) : [];
+    $sel = array_flip($sel);
+    if (!in_array($do, ['move', 'copy', 'delete'], true)) m3ut_back('m3ut-channels', 'Invalid action', 'error', ['tab' => 'dupstore']);
+    if (!$sel) m3ut_back('m3ut-channels', 'Kono channel select kora hoyni', 'error', ['tab' => 'dupstore']);
+
+    $store = m3ut_ds_get();
+
+    if ($do === 'delete') {
+        $left = []; $n = 0;
+        foreach ($store as $c) { if (isset($sel[$c['uh']])) $n++; else $left[] = $c; }
+        m3ut_ds_save($left);
+        m3ut_back('m3ut-channels', $n . ' ta channel Duplicate Section theke delete hoyeche', 'success', ['tab' => 'dupstore']);
+    }
+
+    // move / copy — main playlist-e pathano
+    if (m3ut_is_remote_path(m3ut_channels_file())) m3ut_back('m3ut-channels', m3ut_remote_block_msg(), 'error', ['tab' => 'dupstore']);
+    $main = m3ut_ds_main();
+    if ($main === null) $main = [];
+    $inMain = [];
+    foreach ($main as $c) $inMain[$c['uh']] = 1;
+
+    $added = 0; $skipped = 0; $left = [];
+    foreach ($store as $c) {
+        if (!isset($sel[$c['uh']])) { $left[] = $c; continue; }
+        if (isset($inMain[$c['uh']])) {                 // ei URL main-e age theke ache — duibar jog korbo na
+            $skipped++;
+            if ($do === 'copy') $left[] = $c;
+            continue;
+        }
+        $main[] = $c; $inMain[$c['uh']] = 1; $added++;
+        if ($do === 'copy') $left[] = $c;
+    }
+    if ($added > 0 && !m3ut_write_channels(m3ut_channels_to_raw($main))) {
+        m3ut_back('m3ut-channels', 'File likha jayni. channels file writable kina check korun.', 'error', ['tab' => 'dupstore']);
+    }
+    m3ut_ds_save($left);                                // main-e likha success hole tarpor-i section update
+    if ($added > 0) m3ut_links_sync();
+    $msg = $added . ' ta channel main playlist-e ' . ($do === 'move' ? 'move' : 'copy') . ' hoyeche';
+    if ($skipped) $msg .= ' (' . $skipped . ' ta-r URL main-e age theke chhilo, tai notun kore jog hoyni)';
+    $msg .= '. Mone rakhben: scan-er por auto-sort cholle ei naam-er prothom active ta-i main-e thakbe.';
+    m3ut_back('m3ut-channels', $msg, 'success', ['tab' => 'dupstore']);
+});
+
+/* ---------- Duplicate Section tab ---------- */
+function m3ut_tab_dupstore() {
+    $remote = m3ut_is_remote_path(m3ut_channels_file());
+    $store  = m3ut_ds_get();
+    $main   = (array) m3ut_read_channels();
+    $dsm    = m3ut_ds_status_map();
+    $last   = get_option('m3ut_dup_last', []);
+    $mainNames = []; $mainUh = [];
+    foreach ($main as $c) { $mainNames[m3ut_norm_name($c['name'])] = 1; $mainUh[$c['uh']] = 1; }
+    ?>
+    <div class="m3ut-card" style="margin-top:16px">
+        <p><strong><?php echo count($store); ?></strong> ta channel Duplicate Section-e ache.</p>
+        <p class="description">Ei section-er channel gulo <strong>live playlist-e jay na</strong> (play/include hoy na, go-link-o kaj kore na). Dead scan cholle ei channel gulo-o check hoy (shudhu ekhane status dekhay, Dead checker list-e na). Scan shesh hole prottek naam-er <strong>prothom active</strong> channel main-e thake, baki gulo ekhane ashe.</p>
+        <?php if ($remote): ?><p class="description" style="color:#b32d2e"><?php echo esc_html(m3ut_remote_block_msg()); ?> (Move/Copy/auto-sort bondho, shudhu Delete cholbe)</p><?php endif; ?>
+        <?php if (!$remote): ?>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0">
+                <input type="hidden" name="action" value="m3ut_ds_toggle"><?php wp_nonce_field('m3ut_ds_toggle'); ?>
+                <button type="submit" class="button">Scan-er por auto move: <strong><?php echo m3ut_dup_auto_on() ? 'ON ✅' : 'OFF ⛔'; ?></strong> (click kore bodlan)</button>
+            </form>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:0" onsubmit="return confirm('Ekhoni main + section milie prothom active ta main-e rekhe baki gulo section-e pathano hobe. Cholbe?');">
+                <input type="hidden" name="action" value="m3ut_ds_collect"><?php wp_nonce_field('m3ut_ds_collect'); ?>
+                <button type="submit" class="button">🔄 Ekhoni sort korun</button>
+            </form>
+        </div>
+        <?php if (!empty($last['t'])): ?><p class="description" style="margin-bottom:0">Shesh auto/manual sort: <?php echo esc_html($last['t']); ?> — <?php echo (int) $last['m']; ?> ta section-e gyeche, <?php echo (int) $last['p']; ?> ta section theke main-e eshechhe.</p><?php endif; ?>
+        <?php endif; ?>
+    </div>
+    <?php if (!$store): ?>
+        <div class="m3ut-card"><p>Section ekhon faka. Dead scan shesh hole ba <strong>🧬 Duplicate naam</strong> tab-er button chaple duplicate gulo ekhane ashbe.</p></div>
+        <?php return; ?>
+    <?php endif; ?>
+    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="m3ut-ds-form" class="m3ut-card" style="margin-top:16px">
+        <input type="hidden" name="action" value="m3ut_ds_action">
+        <?php wp_nonce_field('m3ut_ds_action'); ?>
+        <p style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="text" id="m3ut-ds-filter" placeholder="Naam diye khujun…" class="regular-text">
+            <?php if (!$remote): ?>
+            <button type="submit" name="do" value="move" class="button button-primary">⬆ Move to main playlist</button>
+            <button type="submit" name="do" value="copy" class="button">⧉ Copy to main playlist</button>
+            <?php endif; ?>
+            <button type="submit" name="do" value="delete" class="button" style="color:#d63638" onclick="return confirm('Select kora channel gulo Duplicate Section theke choyirokaler moto delete hobe. Cholbe?');">🗑 Delete</button>
+        </p>
+        <div class="m3ut-scroll"><table class="widefat striped" id="m3ut-ds-table">
+            <thead><tr><th style="width:30px"><input type="checkbox" id="m3ut-ds-all"></th><th style="width:40px">No</th><th style="width:50px">Logo</th><th>Naam</th><th>Group</th><th>URL</th></tr></thead>
+            <tbody>
+            <?php foreach ($store as $i => $c):
+                $s = isset($dsm[$c['uh']]['s']) ? $dsm[$c['uh']]['s'] : ''; ?>
+                <tr class="m3ut-ds-row" data-name="<?php echo esc_attr(m3ut_norm_name($c['name'])); ?>">
+                    <td><input type="checkbox" name="uh[]" value="<?php echo esc_attr($c['uh']); ?>" class="m3ut-ds-cb"></td>
+                    <td><?php echo (int) ($i + 1); ?></td>
+                    <td><?php echo $c['logo'] ? '<img src="' . esc_url($c['logo']) . '" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' : '—'; ?></td>
+                    <td><strong><?php echo esc_html($c['name']); ?></strong>
+                        <?php if ($s === 'ok') echo m3ut_badge('Active', '#00a32a'); elseif ($s === 'dead') echo m3ut_badge('Dead', '#d63638'); else echo m3ut_badge('Check hoyni', '#8c8f94'); ?>
+                        <?php if (isset($mainUh[$c['uh']])): ?> <?php echo m3ut_badge('URL main-e ache', '#d63638'); ?>
+                        <?php elseif (isset($mainNames[m3ut_norm_name($c['name'])])): ?> <?php echo m3ut_badge('Main-e same naam ache', '#8e44ad'); ?><?php endif; ?></td>
+                    <td><?php echo esc_html($c['group']); ?></td>
+                    <td class="m3ut-dup-url"><?php echo m3ut_url_pretty($c['url'], 60); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table></div>
+    </form>
+    <script>
+    (function () {
+        var form = document.getElementById('m3ut-ds-form');
+        if (!form) return;
+        var all = document.getElementById('m3ut-ds-all');
+        function rows() { return Array.prototype.filter.call(document.querySelectorAll('.m3ut-ds-row'), function (r) { return r.style.display !== 'none'; }); }
+        all.addEventListener('change', function () { rows().forEach(function (r) { r.querySelector('.m3ut-ds-cb').checked = all.checked; }); });
+        document.getElementById('m3ut-ds-filter').addEventListener('input', function () {
+            var q = this.value.toLowerCase();
+            document.querySelectorAll('.m3ut-ds-row').forEach(function (r) { r.style.display = r.getAttribute('data-name').indexOf(q) > -1 ? '' : 'none'; });
+        });
+        form.addEventListener('submit', function (e) {
+            if (!form.querySelector('.m3ut-ds-cb:checked')) { e.preventDefault(); alert('Age kon channel gulo nite chan ta tick diye select korun.'); }
+        });
+    })();
+    </script>
+    <?php
 }

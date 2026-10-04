@@ -1,7 +1,7 @@
 <?php
 if (!defined('ABSPATH')) exit;
 
-define('M3UT_GH_REPO', 'arifdhipu/m3u-tracker');
+define('M3UT_GH_REPO', 'goodlybd/m3u-tracker');
 
 function m3ut_update_info() {
     if (!isset($_GET['force-check']) && !isset($_GET['m3ut_debug2'])) {
@@ -79,3 +79,4 @@ add_filter('upgrader_source_selection', function ($source, $remote, $upgrader, $
     if ($wp_filesystem->move($source, $want, true)) return $want;
     return new WP_Error('m3ut_rename', 'Plugin folder rename kora jayni');
 }, 10, 4);
+
