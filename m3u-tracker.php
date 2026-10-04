@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: M3U Tracker
- * Description: tv.php playlist tracker: reseller manager, customer keys, kill switch, live counter, channel stats, dead link checker, Telegram/email alerts, channels.txt editor.
+ * Description: m3u/iptv playlist tracker: reseller manager, customer keys, kill switch, live counter, channel stats, dead link checker, Telegram/email alerts, channels.txt editor.
  * Version: 3.5.0
- * Author: Goodly.com.bd
+ * Author: Goodly BD
  */
 
 if (!defined('ABSPATH')) exit;
