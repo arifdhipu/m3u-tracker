@@ -821,8 +821,8 @@ function m3ut_page_channels() {
                m3ut_live_ui();
     if ($tab === 'editor') m3ut_tab_editor();
     elseif ($tab === 'list') m3ut_tab_list();
-    elseif ($tab === 'duplicate') m3ut_tab_duplicate();
-    elseif ($tab === 'duplicate') m3ut_tab_duplicate();
+        elseif ($tab === 'duplicate') m3ut_tab_duplicate();
+    elseif ($tab === 'dupstore') m3ut_tab_dupstore();
     else m3ut_tab_checker();
         if ($tab !== 'editor') m3ut_bulk_ui();
     echo '</div>';
@@ -2329,12 +2329,14 @@ function m3ut_dup_autosort($force = false) {
     foreach ($promote as $p) $promUh[$p['c']['uh']] = 1;
     ksort($drop);
     $newStore = []; $have = []; $newDs = $ds;
+    $nos = get_option('m3ut_dup_nos', []); if (!is_array($nos)) $nos = [];
     foreach ($store as $c) {
         if (isset($promUh[$c['uh']])) continue;
         $newStore[] = $c; $have[$c['uh']] = 1;
     }
     foreach ($drop as $d) {
         $uh = $d['c']['uh'];
+        if (!empty($d['c']['no']) && empty($nos[$uh])) $nos[$uh] = (int) $d['c']['no'];
         if (isset($ls[$uh])) {                                               // main-e thakar shomoy-er status section-e niye jai
             $r = $ls[$uh];
             $newDs[$uh] = ['s' => $r->status, 'c' => (int) $r->http_code, 'e' => (string) $r->error, 't' => (string) $r->last_checked];
@@ -2349,6 +2351,8 @@ function m3ut_dup_autosort($force = false) {
 
     foreach (array_keys($newDs) as $k) if (!isset($have[$k])) unset($newDs[$k]);
     update_option('m3ut_dup_status', $newDs, false);
+    foreach (array_keys($nos) as $k) if (!isset($have[$k]) && !isset($inMain[$k]) && !isset($promUh[$k])) unset($nos[$k]);
+    update_option('m3ut_dup_nos', $nos, false);
 
     m3ut_links_sync();                                                       // Dead checker list-o mil kore dei
     foreach ($promote as $p) {                                               // notun main-e ashar por status "Check hoyni" na hoye ager status-i thakuk
@@ -2422,7 +2426,7 @@ add_action('admin_post_m3ut_ds_action', function () {
     $inMain = [];
     foreach ($main as $c) $inMain[$c['uh']] = 1;
 
-    $added = 0; $skipped = 0; $left = [];
+    $added = 0; $skipped = 0; $left = []; $toAdd = [];
     foreach ($store as $c) {
         if (!isset($sel[$c['uh']])) { $left[] = $c; continue; }
         if (isset($inMain[$c['uh']])) {                 // ei URL main-e age theke ache — duibar jog korbo na
@@ -2430,9 +2434,25 @@ add_action('admin_post_m3ut_ds_action', function () {
             if ($do === 'copy') $left[] = $c;
             continue;
         }
-        $main[] = $c; $inMain[$c['uh']] = 1; $added++;
+        $toAdd[] = $c; $inMain[$c['uh']] = 1; $added++;
         if ($do === 'copy') $left[] = $c;
     }
+    
+        // main-e boshano: original number save thakle sei number-er jaygay, na thakle shesh-e
+    $nosM = get_option('m3ut_dup_nos', []); if (!is_array($nosM)) $nosM = [];
+    $withNo = []; $noNo = [];
+    foreach ($toAdd as $c) {
+        if (!empty($nosM[$c['uh']])) $withNo[] = ['n' => (int) $nosM[$c['uh']], 'c' => $c]; else $noNo[] = $c;
+    }
+    usort($withNo, function ($a, $b) { return $a['n'] <=> $b['n']; });
+    $prevPos = -1;
+    foreach ($withNo as $w) {
+        $pos = min(max($w['n'] - 1, $prevPos + 1), count($main));
+        array_splice($main, $pos, 0, [$w['c']]);
+        $prevPos = $pos;
+    }
+    foreach ($noNo as $c) $main[] = $c;
+    
     if ($added > 0 && !m3ut_write_channels(m3ut_channels_to_raw($main))) {
         m3ut_back('m3ut-channels', 'File likha jayni. channels file writable kina check korun.', 'error', ['tab' => 'dupstore']);
     }
@@ -2444,6 +2464,69 @@ add_action('admin_post_m3ut_ds_action', function () {
     m3ut_back('m3ut-channels', $msg, 'success', ['tab' => 'dupstore']);
 });
 
+/* ---------- Duplicate Section: notun channel add / edit / delete (shudhu section-e, main playlist-e na) ---------- */
+function m3ut_ds_clean($v) { return trim(str_replace(['"', "\r", "\n"], '', (string) $v)); }
+function m3ut_ds_build($name, $group, $logo, $url) {
+    $x = '#EXTINF:-1';
+    if ($logo !== '')  $x .= ' tvg-logo="' . $logo . '"';
+    if ($group !== '') $x .= ' group-title="' . $group . '"';
+    $x .= ',' . $name;
+    return m3ut_mk([$x], $url);
+}
+add_action('admin_post_m3ut_ds_add', function () {
+    m3ut_cap(); check_admin_referer('m3ut_ds_add');
+    $p = wp_unslash($_POST);
+    $name = m3ut_ds_clean(isset($p['name']) ? $p['name'] : ''); $url = m3ut_ds_clean(isset($p['url']) ? $p['url'] : '');
+    $logo = m3ut_ds_clean(isset($p['logo']) ? $p['logo'] : ''); $group = m3ut_ds_clean(isset($p['group']) ? $p['group'] : '');
+    if ($name === '' || !preg_match('~^[a-z][a-z0-9+.\-]*://~i', $url)) m3ut_back('m3ut-channels', 'Naam ar valid stream URL dorkar', 'error', ['tab' => 'dupstore']);
+    $nc = m3ut_ds_build($name, $group, $logo, $url);
+    $store = m3ut_ds_get();
+    foreach ($store as $c) {
+        if ($c['uh'] === $nc['uh']) m3ut_back('m3ut-channels', 'Ei URL Duplicate Section-e age theke ache', 'error', ['tab' => 'dupstore']);
+    }
+    $store[] = $nc;
+    m3ut_ds_save($store);
+    m3ut_back('m3ut-channels', "'" . $name . "' Duplicate Section-e add hoyeche", 'success', ['tab' => 'dupstore']);
+});
+
+add_action('wp_ajax_m3ut_ds_edit', function () {
+    if (!current_user_can('manage_options')) wp_send_json_error('Permission nei');
+    check_ajax_referer('m3ut_ds_nonce', 'nonce');
+    $p = wp_unslash($_POST);
+    $uh = isset($p['uh']) ? sanitize_text_field($p['uh']) : '';
+    $name = m3ut_ds_clean(isset($p['name']) ? $p['name'] : ''); $url = m3ut_ds_clean(isset($p['url']) ? $p['url'] : '');
+    $logo = m3ut_ds_clean(isset($p['logo']) ? $p['logo'] : ''); $group = m3ut_ds_clean(isset($p['group']) ? $p['group'] : '');
+    if ($uh === '' || $name === '' || !preg_match('~^[a-z][a-z0-9+.\-]*://~i', $url)) wp_send_json_error('Naam ar valid stream URL dorkar');
+    $nc = m3ut_ds_build($name, $group, $logo, $url);
+    $store = m3ut_ds_get(); $found = false;
+    foreach ($store as $c) {
+        if ($c['uh'] !== $uh && $c['uh'] === $nc['uh']) wp_send_json_error('Ei URL section-er onno channel-e age theke ache');
+    }
+    foreach ($store as $i => $c) {
+        if ($c['uh'] === $uh) { $store[$i] = $nc; $found = true; break; }
+    }
+    if (!$found) wp_send_json_error('Channel ta section-e ar nei — page reload korun');
+    m3ut_ds_save($store);
+    if ($nc['uh'] !== $uh) {                       // URL bodleche — purono status mucche dei (notun-ta "Check hoyni" hobe)
+        $map = m3ut_ds_status_map(); unset($map[$uh]);
+        update_option('m3ut_dup_status', $map, false);
+                $nos = get_option('m3ut_dup_nos', []);
+        if (is_array($nos) && isset($nos[$uh])) { $nos[$nc['uh']] = $nos[$uh]; unset($nos[$uh]); update_option('m3ut_dup_nos', $nos, false); }
+    }
+    wp_send_json_success(['uh' => $nc['uh']]);
+});
+
+add_action('wp_ajax_m3ut_ds_delete', function () {
+    if (!current_user_can('manage_options')) wp_send_json_error('Permission nei');
+    check_ajax_referer('m3ut_ds_nonce', 'nonce');
+    $uh = isset($_POST['uh']) ? sanitize_text_field(wp_unslash($_POST['uh'])) : '';
+    $store = m3ut_ds_get(); $left = [];
+    foreach ($store as $c) { if ($c['uh'] !== $uh) $left[] = $c; }
+    if (count($left) === count($store)) wp_send_json_error('Channel ta age theke-i nei — page reload korun');
+    m3ut_ds_save($left);
+    wp_send_json_success(['uh' => $uh, 'left' => count($left)]);
+});
+
 /* ---------- Duplicate Section tab ---------- */
 function m3ut_tab_dupstore() {
     $remote = m3ut_is_remote_path(m3ut_channels_file());
@@ -2451,6 +2534,7 @@ function m3ut_tab_dupstore() {
     $main   = (array) m3ut_read_channels();
     $dsm    = m3ut_ds_status_map();
     $last   = get_option('m3ut_dup_last', []);
+        $dsNos  = get_option('m3ut_dup_nos', []); if (!is_array($dsNos)) $dsNos = [];
     $mainNames = []; $mainUh = [];
     foreach ($main as $c) { $mainNames[m3ut_norm_name($c['name'])] = 1; $mainUh[$c['uh']] = 1; }
     ?>
@@ -2472,54 +2556,327 @@ function m3ut_tab_dupstore() {
         <?php if (!empty($last['t'])): ?><p class="description" style="margin-bottom:0">Shesh auto/manual sort: <?php echo esc_html($last['t']); ?> — <?php echo (int) $last['m']; ?> ta section-e gyeche, <?php echo (int) $last['p']; ?> ta section theke main-e eshechhe.</p><?php endif; ?>
         <?php endif; ?>
     </div>
-    <?php if (!$store): ?>
-        <div class="m3ut-card"><p>Section ekhon faka. Dead scan shesh hole ba <strong>🧬 Duplicate naam</strong> tab-er button chaple duplicate gulo ekhane ashbe.</p></div>
-        <?php return; ?>
-    <?php endif; ?>
-    <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="m3ut-ds-form" class="m3ut-card" style="margin-top:16px">
-        <input type="hidden" name="action" value="m3ut_ds_action">
-        <?php wp_nonce_field('m3ut_ds_action'); ?>
-        <p style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-            <input type="text" id="m3ut-ds-filter" placeholder="Naam diye khujun…" class="regular-text">
-            <?php if (!$remote): ?>
-            <button type="submit" name="do" value="move" class="button button-primary">⬆ Move to main playlist</button>
-            <button type="submit" name="do" value="copy" class="button">⧉ Copy to main playlist</button>
-            <?php endif; ?>
-            <button type="submit" name="do" value="delete" class="button" style="color:#d63638" onclick="return confirm('Select kora channel gulo Duplicate Section theke choyirokaler moto delete hobe. Cholbe?');">🗑 Delete</button>
+    <?php
+    $dsCols = ['no' => 'No', 'logo' => 'Logo', 'name' => 'Naam', 'group' => 'Group', 'url' => 'URL', 'action' => 'Action'];
+    $dsGroups = [];
+    foreach ($store as $c) { if ($c['group'] !== '') $dsGroups[$c['group']] = 1; }
+    foreach ($main as $c) { if ($c['group'] !== '') $dsGroups[$c['group']] = 1; }
+    ?>
+    <style>
+        #m3ut-ds-table.m3ut-ds-hide-no [data-col="no"],
+        #m3ut-ds-table.m3ut-ds-hide-logo [data-col="logo"],
+        #m3ut-ds-table.m3ut-ds-hide-name [data-col="name"],
+        #m3ut-ds-table.m3ut-ds-hide-group [data-col="group"],
+        #m3ut-ds-table.m3ut-ds-hide-url [data-col="url"],
+        #m3ut-ds-table.m3ut-ds-hide-action [data-col="action"] { display:none }
+        #m3ut-ds-grid-wrap { display:none; gap:14px; grid-template-columns:repeat(var(--m3ut-ds-cols,5), minmax(0,1fr)); }
+        #m3ut-ds-grid-wrap .m3ut-ds-card { min-width:0; max-width:none; box-sizing:border-box; text-align:center; position:relative }
+        #m3ut-ds-grid-wrap .m3ut-ds-card .m3ut-ds-cb { position:absolute; top:8px; left:8px }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js" onerror="window.m3utHlsFailed=true"></script>
+
+    <div class="m3ut-card" style="margin-top:16px">
+        <p>
+            <button type="button" class="button" id="m3ut-ds-view-list">☰ List view</button>
+            <button type="button" class="button" id="m3ut-ds-view-grid">▦ Grid view</button>
+            <button type="button" class="button button-primary" id="m3ut-ds-add-btn" onclick="document.getElementById('m3ut-ds-add-box').style.display='block';this.style.display='none'">+ Notun channel add</button>
+            <input type="text" id="m3ut-ds-filter" placeholder="Naam/group diye khujun…" class="regular-text" style="margin-left:10px">
+            <label style="margin-left:10px;font-weight:400">Grid-e ek row-e: <select id="m3ut-ds-grid-cols">
+                <?php foreach ([4, 5, 6, 8, 10] as $n): ?><option value="<?php echo (int) $n; ?>" <?php selected($n, 5); ?>><?php echo (int) $n; ?> ta channel</option><?php endforeach; ?>
+            </select></label>
         </p>
-        <div class="m3ut-scroll"><table class="widefat striped" id="m3ut-ds-table">
-            <thead><tr><th style="width:30px"><input type="checkbox" id="m3ut-ds-all"></th><th style="width:40px">No</th><th style="width:50px">Logo</th><th>Naam</th><th>Group</th><th>URL</th></tr></thead>
-            <tbody>
-            <?php foreach ($store as $i => $c):
-                $s = isset($dsm[$c['uh']]['s']) ? $dsm[$c['uh']]['s'] : ''; ?>
-                <tr class="m3ut-ds-row" data-name="<?php echo esc_attr(m3ut_norm_name($c['name'])); ?>">
-                    <td><input type="checkbox" name="uh[]" value="<?php echo esc_attr($c['uh']); ?>" class="m3ut-ds-cb"></td>
-                    <td><?php echo (int) ($i + 1); ?></td>
-                    <td><?php echo $c['logo'] ? '<img src="' . esc_url($c['logo']) . '" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' : '—'; ?></td>
-                    <td><strong><?php echo esc_html($c['name']); ?></strong>
-                        <?php if ($s === 'ok') echo m3ut_badge('Active', '#00a32a'); elseif ($s === 'dead') echo m3ut_badge('Dead', '#d63638'); else echo m3ut_badge('Check hoyni', '#8c8f94'); ?>
-                        <?php if (isset($mainUh[$c['uh']])): ?> <?php echo m3ut_badge('URL main-e ache', '#d63638'); ?>
-                        <?php elseif (isset($mainNames[m3ut_norm_name($c['name'])])): ?> <?php echo m3ut_badge('Main-e same naam ache', '#8e44ad'); ?><?php endif; ?></td>
-                    <td><?php echo esc_html($c['group']); ?></td>
-                    <td class="m3ut-dup-url"><?php echo m3ut_url_pretty($c['url'], 60); ?></td>
-                </tr>
+        <p id="m3ut-ds-col-box" style="border:1px solid #dcdcde;border-radius:6px;padding:8px 12px">
+            <strong style="margin-right:8px">Column dekhaben:</strong>
+            <?php foreach ($dsCols as $k => $label): ?>
+                <label style="margin-right:14px;font-weight:400"><input type="checkbox" class="m3ut-ds-col-toggle" data-col="<?php echo esc_attr($k); ?>" checked> <?php echo esc_html($label); ?></label>
             <?php endforeach; ?>
-            </tbody>
-        </table></div>
-    </form>
+        </p>
+        <div id="m3ut-ds-add-box" class="m3ut-form" style="display:none;border:1px solid #dcdcde;border-radius:6px;padding:12px;margin:0;max-width:640px">
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('m3ut_ds_add'); ?>
+                <input type="hidden" name="action" value="m3ut_ds_add">
+                <label>Naam</label><input type="text" name="name" class="regular-text" required>
+                <label>Group</label><input type="text" name="group" class="regular-text" list="m3ut-ds-groups">
+                <datalist id="m3ut-ds-groups"><?php foreach (array_keys($dsGroups) as $g) echo '<option value="' . esc_attr($g) . '">'; ?></datalist>
+                <label>Logo URL</label><input type="url" name="logo" class="large-text">
+                <label>Stream URL</label><input type="text" name="url" class="large-text" required>
+                <p><button class="button button-primary">Add (Duplicate Section-e)</button></p>
+            </form>
+        </div>
+    </div>
+
+    <?php if (!$store): ?>
+        <div class="m3ut-card"><p>Section ekhon faka. Dead scan shesh hole ba <strong>🧬 Duplicate naam</strong> tab-er button chaple duplicate gulo ekhane ashbe — ba upore <strong>+ Notun channel add</strong> diye nijei jog korun.</p></div>
+    <?php else: ?>
+    <div class="m3ut-card" style="margin-top:16px">
+        <p style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:0">
+            <label style="font-weight:400"><input type="checkbox" id="m3ut-ds-all"> Shob select</label>
+            <?php if (!$remote): ?>
+            <button type="submit" form="m3ut-ds-form" name="do" value="move" class="button button-primary">⬆ Move to main playlist</button>
+            <button type="submit" form="m3ut-ds-form" name="do" value="copy" class="button">⧉ Copy to main playlist</button>
+            <?php endif; ?>
+            <button type="submit" form="m3ut-ds-form" name="do" value="delete" class="button" style="color:#d63638" onclick="return confirm('Select kora channel gulo Duplicate Section theke choyirokaler moto delete hobe. Cholbe?');">🗑 Delete (select kora)</button>
+            <span class="description"><strong id="m3ut-ds-count"><?php echo count($store); ?></strong> ta channel</span>
+        </p>
+
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="m3ut-ds-form">
+            <input type="hidden" name="action" value="m3ut_ds_action">
+            <?php wp_nonce_field('m3ut_ds_action'); ?>
+
+            <div id="m3ut-ds-list-wrap" class="m3ut-scroll"><table class="widefat striped" id="m3ut-ds-table">
+                <thead><tr>
+                    <th style="width:30px"></th>
+                    <th data-col="no" style="width:40px">No</th><th data-col="logo" style="width:50px">Logo</th>
+                    <th data-col="name">Naam</th><th data-col="group">Group</th><th data-col="url">URL</th>
+                    <th data-col="action" style="width:260px">Action</th>
+                </tr></thead>
+                <tbody>
+                <?php foreach ($store as $i => $c):
+                    $s  = isset($dsm[$c['uh']]['s']) ? $dsm[$c['uh']]['s'] : '';
+                    $nk = m3ut_norm_name($c['name']);
+                    $badges = ($s === 'ok' ? m3ut_badge('Active', '#00a32a') : ($s === 'dead' ? m3ut_badge('Dead', '#d63638') : m3ut_badge('Check hoyni', '#8c8f94')));
+                    if (isset($mainUh[$c['uh']])) $badges .= ' ' . m3ut_badge('URL main-e ache', '#d63638');
+                    elseif (isset($mainNames[$nk])) $badges .= ' ' . m3ut_badge('Main-e same naam ache', '#8e44ad');
+                    $attrs = 'data-uh="' . esc_attr($c['uh']) . '" data-cname="' . esc_attr($c['name']) . '" data-cgroup="' . esc_attr($c['group']) . '" data-clogo="' . esc_attr($c['logo']) . '" data-curl="' . esc_attr($c['url']) . '" data-name="' . esc_attr(strtolower($c['name'] . ' ' . $c['group'])) . '"';
+                ?>
+                    <tr class="m3ut-ds-item m3ut-ds-row" <?php echo $attrs; ?>>
+                        <td><input type="checkbox" name="uh[]" value="<?php echo esc_attr($c['uh']); ?>" class="m3ut-ds-cb"></td>
+                        <td data-col="no" class="m3ut-ds-no" style="font-size:18px;font-weight:800"><?php echo !empty($dsNos[$c['uh']]) ? (int) $dsNos[$c['uh']] : '—'; ?></td>
+                        <td data-col="logo"><?php echo $c['logo'] ? '<img src="' . esc_url($c['logo']) . '" style="width:32px;height:32px;object-fit:cover;border-radius:4px" onerror="this.style.display=\'none\'">' : '—'; ?></td>
+                        <td data-col="name"><strong><?php echo esc_html($c['name']); ?></strong> <?php echo $badges; ?></td>
+                        <td data-col="group"><?php echo esc_html($c['group']); ?></td>
+                        <td data-col="url" class="m3ut-dup-url"><?php echo m3ut_url_pretty($c['url'], 60); ?></td>
+                        <td data-col="action">
+                            <button type="button" class="button button-small m3ut-btn-test" data-url="<?php echo esc_attr($c['url']); ?>" data-name="<?php echo esc_attr($c['name']); ?>">▶ Test</button>
+                            <button type="button" class="button button-small m3ut-ds-edit">✏ Edit</button>
+                            <button type="button" class="button button-small m3ut-ds-del" style="color:#d63638">🗑 Delete</button>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table></div>
+
+            <div id="m3ut-ds-grid-wrap">
+                <?php foreach ($store as $i => $c):
+                    $s  = isset($dsm[$c['uh']]['s']) ? $dsm[$c['uh']]['s'] : '';
+                    $nk = m3ut_norm_name($c['name']);
+                    $badges = ($s === 'ok' ? m3ut_badge('Active', '#00a32a') : ($s === 'dead' ? m3ut_badge('Dead', '#d63638') : m3ut_badge('Check hoyni', '#8c8f94')));
+                    if (isset($mainUh[$c['uh']])) $badges .= ' ' . m3ut_badge('URL main-e ache', '#d63638');
+                    elseif (isset($mainNames[$nk])) $badges .= ' ' . m3ut_badge('Main-e same naam ache', '#8e44ad');
+                    $attrs = 'data-uh="' . esc_attr($c['uh']) . '" data-cname="' . esc_attr($c['name']) . '" data-cgroup="' . esc_attr($c['group']) . '" data-clogo="' . esc_attr($c['logo']) . '" data-curl="' . esc_attr($c['url']) . '" data-name="' . esc_attr(strtolower($c['name'] . ' ' . $c['group'])) . '"';
+                ?>
+                <div class="m3ut-card m3ut-ds-item m3ut-ds-card" <?php echo $attrs; ?>>
+                    <input type="checkbox" value="<?php echo esc_attr($c['uh']); ?>" class="m3ut-ds-cb">
+                    <?php if ($c['logo']): ?><img src="<?php echo esc_url($c['logo']); ?>" style="width:56px;height:56px;object-fit:cover;border-radius:8px" onerror="this.style.display='none'"><?php endif; ?>
+                    <p style="font-weight:700;margin:8px 0 2px;word-break:break-word"><?php echo esc_html($c['name']); ?></p>
+                    <p style="margin:0 0 4px"><?php echo $badges; ?></p>
+                    <p style="margin:0 0 8px;font-size:12px"><strong class="m3ut-ds-gno" style="font-size:18px;font-weight:800"><?php echo !empty($dsNos[$c['uh']]) ? (int) $dsNos[$c['uh']] : '—'; ?></strong> <span style="opacity:.7">· <?php echo esc_html($c['group'] ?: '—'); ?></span></p>
+                    <div style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap">
+                        <button type="button" class="button button-small m3ut-btn-test" data-url="<?php echo esc_attr($c['url']); ?>" data-name="<?php echo esc_attr($c['name']); ?>">▶ Test</button>
+                        <button type="button" class="button button-small m3ut-ds-edit">✏ Edit</button>
+                        <button type="button" class="button button-small m3ut-ds-del" style="color:#d63638">🗑 Delete</button>
+                    </div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+        </form>
+    </div>
+    <?php endif; ?>
+
+    <div id="m3ut-ds-edit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;align-items:center;justify-content:center;padding:10px;box-sizing:border-box">
+        <div class="m3ut-form" style="background:#fff;padding:16px;border-radius:8px;width:100%;max-width:480px;max-height:95vh;overflow:auto;box-sizing:border-box">
+            <h3 style="margin-top:0">✏ Channel edit</h3>
+            <label>Naam</label><input type="text" id="m3ut-ds-e-name" class="large-text">
+            <label>Group</label><input type="text" id="m3ut-ds-e-group" class="large-text" list="m3ut-ds-groups">
+            <label>Logo URL</label><input type="url" id="m3ut-ds-e-logo" class="large-text">
+            <label>Stream URL</label><input type="text" id="m3ut-ds-e-url" class="large-text">
+            <p style="margin:12px 0 0">
+                <button type="button" class="button button-primary" id="m3ut-ds-e-save">💾 Save</button>
+                <button type="button" class="button" id="m3ut-ds-e-cancel">Cancel</button>
+                <span id="m3ut-ds-e-msg" style="color:#d63638;margin-left:8px"></span>
+            </p>
+        </div>
+    </div>
+
+    <div id="m3ut-play-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99999;align-items:center;justify-content:center;padding:10px;box-sizing:border-box">
+        <div style="background:#1d2327;padding:10px;border-radius:8px;width:100%;max-width:360px;max-height:95vh;overflow:auto;box-sizing:border-box">
+            <p style="color:#fff;margin:0 0 8px;font-size:12px;word-break:break-word" id="m3ut-play-title"></p>
+            <div style="position:relative;width:100%;aspect-ratio:16/9;background:#000">
+                <video id="m3ut-play-video" controls autoplay playsinline style="position:absolute;inset:0;width:100%;height:100%;background:#000"></video>
+            </div>
+            <p id="m3ut-play-err" style="color:#f86368;font-size:11px;display:none;margin:8px 0 0"></p>
+            <p style="margin:10px 0 0;display:flex;gap:6px;flex-wrap:wrap">
+                <button type="button" class="button button-small" id="m3ut-play-close" style="background:#d63638;border-color:#d63638;color:#fff">Bondho korun</button>
+                <a id="m3ut-play-open" class="button button-small" target="_blank" rel="noopener" style="background:#2271b1;border-color:#2271b1;color:#fff">Notun tab-e khulun</a>
+                <button type="button" class="button button-small" id="m3ut-play-copy" style="background:#00a32a;border-color:#00a32a;color:#fff">Copy URL</button>
+            </p>
+            <p style="color:#dba617;font-size:11px;max-width:100%;margin:8px 0 0">Note: browser shob format (ts/rtmp/mac-portal) play korte pare na — na cholle "notun tab-e khulun" diye VLC/player-e test korun.</p>
+        </div>
+    </div>
+
     <script>
     (function () {
-        var form = document.getElementById('m3ut-ds-form');
-        if (!form) return;
-        var all = document.getElementById('m3ut-ds-all');
-        function rows() { return Array.prototype.filter.call(document.querySelectorAll('.m3ut-ds-row'), function (r) { return r.style.display !== 'none'; }); }
-        all.addEventListener('change', function () { rows().forEach(function (r) { r.querySelector('.m3ut-ds-cb').checked = all.checked; }); });
-        document.getElementById('m3ut-ds-filter').addEventListener('input', function () {
-            var q = this.value.toLowerCase();
-            document.querySelectorAll('.m3ut-ds-row').forEach(function (r) { r.style.display = r.getAttribute('data-name').indexOf(q) > -1 ? '' : 'none'; });
+        var AJAX = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+        var NONCE = <?php echo wp_json_encode(wp_create_nonce('m3ut_ds_nonce')); ?>;
+        var $ = function (id) { return document.getElementById(id); };
+        var listWrap = $('m3ut-ds-list-wrap'), gridWrap = $('m3ut-ds-grid-wrap');
+        var form = $('m3ut-ds-form');
+
+        /* -- list / grid view (ager choice browser-e mone thake) -- */
+        function setView(v) {
+            if (!listWrap) return;
+            listWrap.style.display = (v === 'grid') ? 'none' : 'block';
+            gridWrap.style.display = (v === 'grid') ? 'grid' : 'none';
+            try { localStorage.setItem('m3ut_ds_view', v); } catch (e) {}
+        }
+        $('m3ut-ds-view-list').onclick = function () { setView('list'); };
+        $('m3ut-ds-view-grid').onclick = function () { setView('grid'); };
+        var v0 = 'list'; try { v0 = localStorage.getItem('m3ut_ds_view') || 'list'; } catch (e) {}
+        setView(v0);
+
+        /* -- grid-e ek row-e koyta channel -- */
+        var colsSel = $('m3ut-ds-grid-cols');
+        function applyGridCols() { if (gridWrap) gridWrap.style.setProperty('--m3ut-ds-cols', parseInt(colsSel.value, 10) || 5); }
+        try { var sc = localStorage.getItem('m3ut_ds_grid_cols'); if (sc) colsSel.value = sc; } catch (e) {}
+        applyGridCols();
+        colsSel.addEventListener('change', function () {
+            applyGridCols();
+            try { localStorage.setItem('m3ut_ds_grid_cols', colsSel.value); } catch (e) {}
         });
-        form.addEventListener('submit', function (e) {
+
+        /* -- column show/hide (list view) -- */
+        var table = $('m3ut-ds-table');
+        var toggles = document.querySelectorAll('.m3ut-ds-col-toggle');
+        function applyCols() {
+            if (!table) return;
+            [].forEach.call(toggles, function (cb) { table.classList.toggle('m3ut-ds-hide-' + cb.getAttribute('data-col'), !cb.checked); });
+        }
+        try {
+            var saved = JSON.parse(localStorage.getItem('m3ut_ds_cols') || '{}');
+            [].forEach.call(toggles, function (cb) { var k = cb.getAttribute('data-col'); if (saved.hasOwnProperty(k)) cb.checked = saved[k]; });
+        } catch (e) {}
+        applyCols();
+        [].forEach.call(toggles, function (cb) {
+            cb.addEventListener('change', function () {
+                applyCols();
+                var st = {}; [].forEach.call(toggles, function (x) { st[x.getAttribute('data-col')] = x.checked; });
+                try { localStorage.setItem('m3ut_ds_cols', JSON.stringify(st)); } catch (e) {}
+            });
+        });
+
+        /* -- search (naam + group) -- */
+        $('m3ut-ds-filter').addEventListener('input', function () {
+            var q = this.value.toLowerCase();
+            [].forEach.call(document.querySelectorAll('.m3ut-ds-item'), function (r) { r.style.display = r.getAttribute('data-name').indexOf(q) > -1 ? '' : 'none'; });
+            if (gridWrap && gridWrap.style.display !== 'none') gridWrap.style.display = 'grid';
+        });
+
+        /* -- checkbox: list + grid sync, select all -- */
+        function setChecked(uh, val) {
+            [].forEach.call(document.querySelectorAll('.m3ut-ds-cb'), function (cb) { if (cb.value === uh) cb.checked = val; });
+        }
+        document.addEventListener('change', function (ev) {
+            var cb = ev.target.closest && ev.target.closest('.m3ut-ds-cb');
+            if (cb) setChecked(cb.value, cb.checked);
+        });
+        var all = $('m3ut-ds-all');
+        if (all) all.addEventListener('change', function () {
+            var wrap = (gridWrap.style.display === 'none') ? listWrap : gridWrap;
+            [].forEach.call(wrap.querySelectorAll('.m3ut-ds-item'), function (it) {
+                if (it.style.display !== 'none') setChecked(it.getAttribute('data-uh'), all.checked);
+            });
+        });
+        if (form) form.addEventListener('submit', function (e) {
             if (!form.querySelector('.m3ut-ds-cb:checked')) { e.preventDefault(); alert('Age kon channel gulo nite chan ta tick diye select korun.'); }
+        });
+
+        /* -- test play (mini player modal) -- */
+        var hls = null;
+        function testPlay(purl, name) {
+            $('m3ut-play-title').textContent = name;
+            $('m3ut-play-open').href = purl;
+            $('m3ut-play-err').style.display = 'none';
+            $('m3ut-play-copy').onclick = function () { if (navigator.clipboard) navigator.clipboard.writeText(purl); };
+            var v = $('m3ut-play-video');
+            v.removeAttribute('src'); v.load();
+            if (hls) { hls.destroy(); hls = null; }
+            function showErr(msg) { var e = $('m3ut-play-err'); e.textContent = msg; e.style.display = 'block'; }
+            if (purl.indexOf('.m3u8') > -1) {
+                if (window.Hls && Hls.isSupported()) {
+                    hls = new Hls();
+                    hls.on(Hls.Events.ERROR, function (ev, data) { if (data && data.fatal) showErr('Stream load hoyni (' + data.type + ') — "notun tab-e khulun" diye VLC-e test korun.'); });
+                    hls.loadSource(purl); hls.attachMedia(v);
+                } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
+                    v.src = purl;
+                } else {
+                    showErr('Ei browser-e HLS play support nei (hls.js load hoyni ba unsupported) — "notun tab-e khulun" diye VLC/player-e test korun.');
+                }
+            } else {
+                v.src = purl;
+                v.play().catch(function () { showErr('Ei format shorasori browser-e play hoy na — "notun tab-e khulun" diye VLC/player-e test korun.'); });
+            }
+            $('m3ut-play-modal').style.display = 'flex';
+        }
+        $('m3ut-play-close').onclick = function () {
+            var v = $('m3ut-play-video'); v.pause(); v.removeAttribute('src'); v.load();
+            if (hls) { hls.destroy(); hls = null; }
+            $('m3ut-play-modal').style.display = 'none';
+        };
+        document.addEventListener('click', function (ev) {
+            var b = ev.target.closest('.m3ut-btn-test');
+            if (b) testPlay(b.getAttribute('data-url'), b.getAttribute('data-name'));
+        });
+
+        /* -- edit (modal + AJAX) -- */
+        var editUh = '';
+        document.addEventListener('click', function (ev) {
+            var b = ev.target.closest('.m3ut-ds-edit');
+            if (!b) return;
+            var it = b.closest('.m3ut-ds-item');
+            editUh = it.getAttribute('data-uh');
+            $('m3ut-ds-e-name').value  = it.getAttribute('data-cname');
+            $('m3ut-ds-e-group').value = it.getAttribute('data-cgroup');
+            $('m3ut-ds-e-logo').value  = it.getAttribute('data-clogo');
+            $('m3ut-ds-e-url').value   = it.getAttribute('data-curl');
+            $('m3ut-ds-e-msg').textContent = '';
+            $('m3ut-ds-edit-modal').style.display = 'flex';
+        });
+        $('m3ut-ds-e-cancel').onclick = function () { $('m3ut-ds-edit-modal').style.display = 'none'; };
+        $('m3ut-ds-e-save').onclick = function () {
+            var btn = this, msg = $('m3ut-ds-e-msg');
+            var body = new URLSearchParams();
+            body.append('action', 'm3ut_ds_edit'); body.append('nonce', NONCE); body.append('uh', editUh);
+            body.append('name', $('m3ut-ds-e-name').value.trim()); body.append('group', $('m3ut-ds-e-group').value.trim());
+            body.append('logo', $('m3ut-ds-e-logo').value.trim()); body.append('url', $('m3ut-ds-e-url').value.trim());
+            msg.textContent = 'Saving…'; btn.disabled = true;
+            fetch(AJAX, { method: 'POST', credentials: 'same-origin', body: body })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res && res.success) { location.reload(); }
+                    else { msg.textContent = (res && res.data) ? res.data : 'Save hoyni'; btn.disabled = false; }
+                })
+                .catch(function () { msg.textContent = 'Network error'; btn.disabled = false; });
+        };
+        
+            /* -- delete (AJAX, reload chhara) -- */
+        document.addEventListener('click', function (ev) {
+            var b = ev.target.closest('.m3ut-ds-del');
+            if (!b) return;
+            var it = b.closest('.m3ut-ds-item'), uh = it.getAttribute('data-uh');
+            if (!confirm('"' + it.getAttribute('data-cname') + '" Duplicate Section theke choyirokaler moto delete hobe. Cholbe?')) return;
+            var body = new URLSearchParams();
+            body.append('action', 'm3ut_ds_delete'); body.append('nonce', NONCE); body.append('uh', uh);
+            b.disabled = true;
+            fetch(AJAX, { method: 'POST', credentials: 'same-origin', body: body })
+                .then(function (r) { return r.json(); })
+                .then(function (res) {
+                    if (res && res.success) {
+                        if (!res.data.left) { location.reload(); return; }
+                        [].forEach.call(document.querySelectorAll('.m3ut-ds-item'), function (el) { if (el.getAttribute('data-uh') === uh) el.remove(); });
+                        var c = $('m3ut-ds-count'); if (c) c.textContent = res.data.left;
+                    } else { alert((res && res.data) ? res.data : 'Delete hoyni'); b.disabled = false; }
+                })
+                .catch(function () { alert('Network error'); b.disabled = false; });
         });
     })();
     </script>

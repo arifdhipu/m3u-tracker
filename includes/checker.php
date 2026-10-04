@@ -121,7 +121,7 @@ function m3ut_scan_batch($n = 6) {
         if (!empty($st['newdead']) && !empty($s['al_dead'])) {
             $total_dead = (int) $wpdb->get_var("SELECT COUNT(*) FROM $t WHERE status='dead'");
             $names = array_slice(array_unique($st['newdead']), 0, 20);
-            m3ut_alert("💀 Notun dead channel (" . count($st['newdead']) . "ta)\n- " . implode("\n- ", $names) . "\n\nMot dead ekhon: $total_dead", 'Dead channels found');
+        m3ut_alert("\u{1F480} Notun dead channel (" . count($st['newdead']) . "ta)\n- " . implode("\n- ", $names) . "\n\nMot dead ekhon: $total_dead", 'Dead channels found');
         }
         $st['newdead'] = [];
                 try { m3ut_dup_boot(); m3ut_dup_autosort(); } catch (\Throwable $e) {} // scan shesh: prothom active ta main-e, baki duplicate Section-e
